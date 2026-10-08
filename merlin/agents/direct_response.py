@@ -28,7 +28,10 @@ def direct_response_node(state: GraphState) -> dict:
     fallback = ("I'm running offline right now (LM Studio unreachable), but I "
                 f"heard you: \"{query}\". Please start the LM Studio server to "
                 "enable full conversation.")
-    updates["final_response"] = get_llm().chat(messages, fallback=fallback).strip()
+    post_event("status", "thinking... (Gemma reasoning)")
+    updates["final_response"] = get_llm().chat(
+        messages, fallback=fallback,
+        on_token=lambda partial: post_event("merlin_partial", partial)).strip()
     return updates
 
 

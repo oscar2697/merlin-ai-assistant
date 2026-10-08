@@ -47,10 +47,6 @@ def opencode_agent_node(state: GraphState) -> dict:
                    + (" and OpenCode launched." if result.get("launched") else "."))
     else:
         summary = f"Could not inject the prompt: {result.get('error')}"
-    updates["final_response"] = get_llm().chat(
-        [{"role": "system",
-          "content": "You are MERLIN's OpenCode agent. Confirm to the user, "
-                     "in their language, what was done. Max 2 sentences."},
-         {"role": "user", "content": f"Request: {query}\nResult: {result}"}],
-        fallback=summary)
+    # Deterministic confirmation: no extra LLM call (latency budget)
+    updates["final_response"] = summary
     return updates

@@ -67,10 +67,14 @@ The routing function uses a **hybrid strategy** (deterministic first, LLM fallba
 - Gemma classifies the query with a structured single-label answer: `os_agent | opencode_agent | web_agent | direct_response`.
 - If the LLM is unreachable, default to `direct_response` (graceful degradation).
 
-## 4. LLM Connectivity
+## 4. LLM Connectivity & Latency Strategy
 
 - Engine: **LM Studio** local server (OpenAI-compatible API, default `http://localhost:1234/v1`), model `google/gemma-4-e4b`, temperature 0.1.
 - Connector: `langchain-openai` (`ChatOpenAI`) with API key from `.env`; model auto-detected via `GET /v1/models` at boot.
+- **Dual-model strategy (latency)**: `gemma-4-e4b` is a *thinking* model and CPU-only on this hardware (~6 tok/s; gemma4 has no GPU kernels yet). Short syntheses (OS tool explanations, web research summaries) use the **fast profile** (`MERLIN_FAST_MODEL`, e.g. `qwen2.5-3b-instruct`, ~7s vs ~47s), while conversation and complex reasoning stay on Gemma.
+- **Streaming**: all LLM answers stream token-by-token to the GUI (`merlin_partial` events), so perceived latency during the reasoning phase is minimal.
+- **Zero-LLM fast paths**: router and OS planner match keywords/regex first; common commands ("open X", "RAM", "play", "search") never touch the LLM (<1s end-to-end).
+- Model loading: both models resident via `lms load <model> --parallel 1` (gemma context capped at 4096 to fit the 16 GB RAM budget).
 - Graceful fallback: if LM Studio is down, all LLM-dependent nodes degrade to deterministic/offline responses and log the failure to `error_logs`.
 
 ## 5. Deployment Notes

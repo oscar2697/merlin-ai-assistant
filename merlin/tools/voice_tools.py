@@ -6,6 +6,7 @@ return an error dict instead of crashing the graph (CONTEXT.md rule 3).
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -23,10 +24,14 @@ _WAKE_LOCK = threading.Lock()
 _WHISPER_LOCK = threading.Lock()
 _WAKE_MODEL = None      # openWakeWord model, loaded once and reused
 _WHISPER_MODEL = None   # faster-whisper model, loaded once and reused
+_PIPER_VOICES: dict = {}  # loaded Piper voices, keyed by model path
 
 # Drop custom openWakeWord .onnx models here (e.g. merlin.onnx) to use them
 # instead of the pre-trained ones (alexa, hey_jarvis, hey_mycroft, hey_rhasspy).
 _WAKEWORD_DIR = Path.home() / "merlin" / "wakewords"
+
+# Biases Whisper towards the names it keeps mishearing ("what's up" -> WhatsApp).
+_STT_HINT = "Merlin, WhatsApp, Spotify, iTunes, Chrome, Discord, Visual Studio Code, Steam, YouTube"
 
 
 def wake_word_available() -> bool:
@@ -163,7 +168,8 @@ def transcribe_audio_stt(audio_path: str) -> dict:
         # int16 PCM -> float32 in [-1, 1], the format faster-whisper expects
         audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
 
-        segments, info = model.transcribe(audio, language=None, task="transcribe")
+        segments, info = model.transcribe(audio, language=None, task="transcribe",
+                                          initial_prompt=_STT_HINT)
         text = " ".join(seg.text.strip() for seg in segments).strip()
         return {"ok": bool(text), "text": text, "language": info.language}
     except ImportError:
@@ -173,9 +179,20 @@ def transcribe_audio_stt(audio_path: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+# ------------------------------------------------------------------------ TTS
+def _clean_for_speech(text: str, max_chars: int = 600) -> str:
+    """Strip markdown and URLs so Piper does not read symbols out loud."""
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"[`*_#>|~\[\]]", "", text)
+    text = re.sub(r"^\s*[-•]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
+
+
 def synthesize_speech_tts(text: str, language: str = "en") -> dict:
     """Piper TTS: Spanish es_ES-* or British English en_GB-* voice."""
     config = get_config()
+    text = _clean_for_speech(text or "")
     if not text:
         return {"ok": False, "error": "Nothing to speak."}
     voice_name = config.piper_voices.get(language, config.piper_voices["en"])
@@ -183,7 +200,9 @@ def synthesize_speech_tts(text: str, language: str = "en") -> dict:
         try:
             return _speak_with_piper_api(text, voice_name)
         except ImportError:
-            pass
+            logger.info("piper Python package not installed - trying the CLI")
+        except Exception as exc:
+            logger.warning("Piper API failed (%s) - trying the CLI", exc)
         try:
             return _speak_with_piper_cli(text, voice_name)
         except Exception as exc:
@@ -192,7 +211,8 @@ def synthesize_speech_tts(text: str, language: str = "en") -> dict:
 
 
 def _find_voice_model(voice_name: str) -> Path | None:
-    """Locate a downloaded Piper .onnx voice (model dir or HuggingFace cache)."""
+    """Locate a downloaded Piper .onnx voice (model dir or HuggingFace cache).
+    The matching <voice>.onnx.json config must sit next to the .onnx file."""
     candidates = [
         Path.home() / "merlin" / "voices" / f"{voice_name}.onnx",
         Path.home() / ".cache" / "piper" / f"{voice_name}.onnx",
@@ -203,18 +223,51 @@ def _find_voice_model(voice_name: str) -> Path | None:
     return None
 
 
+def _get_piper_voice(model_path: Path):
+    key = str(model_path)
+    if key not in _PIPER_VOICES:
+        from piper import PiperVoice  # raises ImportError if piper-tts is missing
+        _PIPER_VOICES[key] = PiperVoice.load(key)
+    return _PIPER_VOICES[key]
+
+
+def _play_wav(path: Path) -> None:
+    """Play a WAV file and block until it finishes."""
+    if sys.platform == "win32":
+        import winsound
+        winsound.PlaySound(str(path), winsound.SND_FILENAME)
+        return
+    import wave
+    import numpy as np
+    import sounddevice as sd
+    with wave.open(str(path), "rb") as wf:
+        rate = wf.getframerate()
+        data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+    sd.play(data, rate)
+    sd.wait()
+
+
 def _speak_with_piper_api(text: str, voice_name: str) -> dict:
-    from piper import PiperVoice  # piper-tts >= 1.3 python API
-    import sounddevice
+    import wave
 
     model_path = _find_voice_model(voice_name)
     if model_path is None:
         raise FileNotFoundError(
-            f"Piper voice '{voice_name}' not downloaded. Place the .onnx under "
-            f"~/merlin/voices/ (es_ES for Spanish, en_GB for British English).")
-    voice = PiperVoice.load(str(model_path))
-    voice.speak(text, length_scale=1.0, speaker=sounddevice.default)
-    return {"ok": True, "voice": voice_name}
+            f"Piper voice '{voice_name}' not downloaded. Place the .onnx and its "
+            f".onnx.json under ~/merlin/voices/ (es_ES for Spanish, en_GB for "
+            f"British English).")
+    voice = _get_piper_voice(model_path)
+    tmp = Path(tempfile.gettempdir()) / f"merlin_tts_{int(time.time() * 1000)}.wav"
+    try:
+        with wave.open(str(tmp), "wb") as wf:
+            if hasattr(voice, "synthesize_wav"):   # piper-tts >= 1.3
+                voice.synthesize_wav(text, wf)
+            else:                                  # piper-tts 1.2.x
+                voice.synthesize(text, wf)
+        _play_wav(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"ok": True, "voice": voice_name, "method": "piper api"}
 
 
 def _speak_with_piper_cli(text: str, voice_name: str) -> dict:
@@ -223,10 +276,14 @@ def _speak_with_piper_cli(text: str, voice_name: str) -> dict:
     model_path = _find_voice_model(voice_name)
     if model_path is None:
         raise FileNotFoundError(f"Piper voice '{voice_name}' not downloaded.")
-    proc = subprocess.run(
-        ["piper", "--model", str(model_path.with_suffix(""))],
-        input=text, capture_output=True, text=True, shell=(sys.platform == "win32"),
-    )
-    # piper CLI writes wav to stdout; player integration is milestone 2
-    return {"ok": proc.returncode == 0, "voice": voice_name,
-            "note": "Piper CLI produced audio (playback wiring is milestone 2)."}
+    tmp = Path(tempfile.gettempdir()) / f"merlin_tts_{int(time.time() * 1000)}.wav"
+    try:
+        proc = subprocess.run(
+            ["piper", "-m", str(model_path), "-f", str(tmp)],
+            input=text, capture_output=True, text=True, encoding="utf-8")
+        if proc.returncode != 0 or not tmp.exists():
+            raise RuntimeError((proc.stderr or "").strip()[-300:] or "piper CLI failed")
+        _play_wav(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"ok": True, "voice": voice_name, "method": "piper cli"}

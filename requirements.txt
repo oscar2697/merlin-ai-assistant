@@ -19,9 +19,11 @@ pyautogui>=0.9.54
 pynput>=1.7.6
 customtkinter>=5.2.0
 send2trash>=1.8.0
+pywin32>=306 ; sys_platform == "win32"  # iTunes COM control
 
 # Web connectivity & utilities
 httpx>=0.27.0
+ddgs>=9.0.0
 uvicorn>=0.30.0
 fastapi>=0.111.0
 

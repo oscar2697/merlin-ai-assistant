@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
+import webbrowser
 from pathlib import Path
 from typing import Tuple
 
@@ -17,6 +20,10 @@ import psutil
 from merlin.config import get_config
 
 logger = logging.getLogger("merlin.tools.system")
+
+# Chrome profile folder to open (see chrome://version -> "Profile Path").
+# Examples: "Default", "Profile 1". Can also be set with MERLIN_CHROME_PROFILE.
+CHROME_PROFILE = os.environ.get("MERLIN_CHROME_PROFILE", "Profile 1")
 
 
 def check_command_safety(command: str) -> Tuple[bool, str]:
@@ -53,9 +60,11 @@ def control_system_resource(action: str) -> dict:
             }}
         if action == "processes":
             procs = []
-            for p in psutil.process_iter(["pid", "name", "memory"]):
+            # "memory_info" is the real psutil attribute ("memory" is not valid)
+            for p in psutil.process_iter(["pid", "name", "memory_info"]):
                 try:
-                    m = p.info.get("memory") or 0
+                    mi = p.info.get("memory_info")
+                    m = mi.rss if mi else 0
                     procs.append((p.info["name"], p.info["pid"], m / 1e6))
                 except Exception:
                     continue
@@ -95,6 +104,48 @@ def execute_terminal_command(command: str, timeout_seconds: int = None) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+# --------------------------------------------------------------------- Chrome
+def _find_chrome() -> str | None:
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Google/Chrome/Application/chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return shutil.which("chrome")
+
+
+def _launch_chrome(url: str = "") -> bool:
+    """Start Chrome directly in the configured profile (skips the profile picker)."""
+    exe = _find_chrome()
+    if not exe:
+        return False
+    cmd = [exe, f"--profile-directory={CHROME_PROFILE}"]
+    if url:
+        cmd.append(url)
+    subprocess.Popen(cmd)
+    return True
+
+
+def search_web(query: str) -> dict:
+    """Open a Google search for `query` in Chrome (default browser as fallback)."""
+    query = (query or "").strip()
+    if not query:
+        return {"ok": False, "error": "No search query provided."}
+    url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
+    try:
+        if sys.platform == "win32" and _launch_chrome(url):
+            return {"ok": True, "query": query, "url": url, "method": "chrome"}
+        webbrowser.open(url)
+        return {"ok": True, "query": query, "url": url, "method": "default browser"}
+    except Exception as exc:
+        logger.exception("search_web failed")
+        return {"ok": False, "error": str(exc)}
+
+
+# ----------------------------------------------------------------------- Apps
 _START_APPS_CACHE: list | None = None
 
 
@@ -137,6 +188,10 @@ def open_app(app_name: str) -> dict:
         return {"ok": False, "error": "No application name provided."}
     try:
         if sys.platform == "win32":
+            # 0) Chrome: launch the exe with a profile so no profile picker shows
+            if "chrome" in app_name.lower() and _launch_chrome():
+                return {"ok": True, "app": "Google Chrome", "method": "chrome profile",
+                        "profile": CHROME_PROFILE}
             # 1) Start-menu apps by AppID: covers Microsoft Store apps (WhatsApp...)
             app = _find_start_app(app_name)
             if app and app.get("AppID"):
@@ -283,13 +338,118 @@ def download_file(url: str, destination_folder: str = "Downloads") -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-def control_media_player(action: str, media_path: str = "") -> dict:
-    """Play/pause/skip media or add a file to the library (skeleton)."""
+# ---------------------------------------------------------------------- Media
+def _itunes_running() -> bool:
+    try:
+        return any((p.info.get("name") or "").lower() == "itunes.exe"
+                   for p in psutil.process_iter(["name"]))
+    except Exception:
+        return False
+
+
+def _itunes_com_action(action: str, shuffle: bool) -> dict | None:
+    """Drive a RUNNING iTunes through COM (it knows whether music is playing, so
+    'play' never pauses by accident). Returns None if pywin32 is not installed."""
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        logger.info("pywin32 not installed - falling back to media keys")
+        return None
+    pythoncom.CoInitialize()  # COM must be initialised in every thread
+    try:
+        it = win32com.client.Dispatch("iTunes.Application")
+        if action == "play":
+            if shuffle:
+                it.LibraryPlaylist.Shuffle = True
+            if it.PlayerState == 1:
+                return {"ok": True, "action": action, "shuffle": shuffle,
+                        "method": "iTunes COM", "note": "already playing"}
+            if shuffle or it.CurrentTrack is None:
+                it.LibraryPlaylist.PlayFirstTrack()
+            else:
+                it.Play()
+        elif action == "pause":
+            it.Pause()
+        elif action == "next":
+            it.NextTrack()
+        elif action == "previous":
+            it.PreviousTrack()
+        elif action == "stop":
+            it.Stop()
+        return {"ok": True, "action": action, "shuffle": shuffle, "method": "iTunes COM"}
+    except Exception as exc:
+        logger.exception("iTunes COM failed")
+        return {"ok": False, "error": f"iTunes COM error: {exc}"}
+    finally:
+        pythoncom.CoUninitialize()
+
+
+# iTunes COM search fields (ITPlaylistSearchField): 0=all, 1=artists, 2=albums, 3=song names
+_ITUNES_FIELD = {"all": 0, "artist": 1, "artists": 1, "album": 2, "albums": 2,
+                 "song": 3, "songs": 3}
+
+
+def _itunes_com_play_specific(track_name: str, search_field: str = "all",
+                              play: bool = True) -> dict | None:
+    """Search the iTunes library and play the best match ('play_track').
+
+    Dispatch launches iTunes automatically if it is closed. Returns None when
+    pywin32 is not installed. play=False is a dry run (used by tests).
+    """
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        logger.info("pywin32 not installed - cannot search the iTunes library")
+        return None
+    pythoncom.CoInitialize()
+    try:
+        it = win32com.client.Dispatch("iTunes.Application")
+        field = _ITUNES_FIELD.get((search_field or "all").lower(), 0)
+        tracks = it.LibraryPlaylist.Search(track_name, field)
+        if (tracks is None or tracks.Count == 0) and field != 0:
+            tracks = it.LibraryPlaylist.Search(track_name, 0)  # retry: all fields
+        if tracks is None or tracks.Count == 0:
+            return {"ok": False, "action": "play_track", "track_name": track_name,
+                    "error": f"Nothing found for '{track_name}' in the iTunes library."}
+        track = tracks.Item(1)
+        if play:
+            track.Play()
+        return {"ok": True, "action": "play_track", "track_name": track_name,
+                "track": track.Name, "artist": track.Artist, "album": track.Album,
+                "method": "iTunes COM", "played": play}
+    except Exception as exc:
+        logger.exception("iTunes COM search failed")
+        return {"ok": False, "error": f"iTunes COM error: {exc}"}
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def control_media_player(action: str, media_path: str = "", shuffle: bool = False,
+                         track_name: str = "", search_field: str = "all") -> dict:
+    """Media control: play/pause/skip, shuffle, play a specific song/artist, import."""
     action = (action or "").lower().strip()
+    if action == "play_track":
+        if not track_name:
+            return {"ok": False, "error": "play_track requires a song or artist name."}
+        if sys.platform == "win32":
+            result = _itunes_com_play_specific(track_name, search_field)
+            if result is not None:
+                return result
+            return {"ok": False,
+                    "error": "pywin32 not installed - cannot search the iTunes library."}
+        return {"ok": False, "error": "play_track is Windows/iTunes-only for now."}
+    if (sys.platform == "win32" and _itunes_running()
+            and action in ("play", "pause", "next", "previous", "stop")):
+        com = _itunes_com_action(action, bool(shuffle))
+        if com is not None:
+            return com
     try:
         import pyautogui
     except ImportError:
         return {"ok": False, "error": "pyautogui not installed - media control unavailable."}
+    # Media keys: 'playpause' is a TOGGLE, it cannot know whether music is playing.
     key_map = {
         "play": "playpause", "pause": "playpause", "next": "nexttrack",
         "previous": "prevtrack", "stop": "stop",
@@ -297,7 +457,7 @@ def control_media_player(action: str, media_path: str = "") -> dict:
     try:
         if action in key_map:
             pyautogui.press(key_map[action])
-            return {"ok": True, "action": action}
+            return {"ok": True, "action": action, "method": "media key"}
         if action == "add_to_library":
             if not media_path:
                 return {"ok": False, "error": "add_to_library requires a media file path."}

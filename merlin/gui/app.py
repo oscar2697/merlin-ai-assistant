@@ -38,6 +38,7 @@ class MerlinApp(ctk.CTk):
         super().__init__()
         self.runtime = runtime
         self.voice_mode = tkinter.BooleanVar(value=False)
+        self._stream_start = None  # index where the streaming response begins
         self._wake_stop = threading.Event()
         self._mic_busy = threading.Lock()  # only one microphone user at a time
 
@@ -195,8 +196,10 @@ class MerlinApp(ctk.CTk):
         for event in drain_events():
             if event.type == "user_input":
                 self._append(f"You (voice): {event.data}\n", _USER_TAG)
+            elif event.type == "merlin_partial":
+                self._render_partial(event.data)
             elif event.type == "merlin_response":
-                self._append(f"MERLIN: {event.data}\n", _MERLIN_TAG)
+                self._finalize_stream(event.data)
                 self.status_label.configure(text="Status: idle")
             elif event.type == "status":
                 self.status_label.configure(text=f"Status: {event.data}")
@@ -205,6 +208,30 @@ class MerlinApp(ctk.CTk):
             elif event.type == "info":
                 self._append(f"{event.data}\n", "info")
         self.after(self.POLL_MS, self._poll_events)
+
+    def _render_partial(self, partial: str) -> None:
+        """Token-by-token streaming: rewrite the tail of the chat."""
+        self.chat.configure(state="normal")
+        if self._stream_start is None:
+            self.chat.insert("end", "\nMERLIN: ", _MERLIN_TAG)
+            self._stream_start = self.chat.index("end-1c")
+        self.chat.delete(self._stream_start, "end-1c")
+        self.chat.insert(self._stream_start, partial, _MERLIN_TAG)
+        self.chat.see("end")
+        self.chat.configure(state="disabled")
+
+    def _finalize_stream(self, response: str) -> None:
+        """Replace the streamed partial with the final full text."""
+        if self._stream_start is not None:
+            self.chat.configure(state="normal")
+            self.chat.delete(self._stream_start, "end-1c")
+            self.chat.insert(self._stream_start, response or "", _MERLIN_TAG)
+            self.chat.insert("end", "\n")
+            self.chat.see("end")
+            self.chat.configure(state="disabled")
+            self._stream_start = None
+        else:
+            self._append(f"MERLIN: {response}\n", _MERLIN_TAG)
 
     def _append(self, text: str, tag: str) -> None:
         self.chat.configure(state="normal")

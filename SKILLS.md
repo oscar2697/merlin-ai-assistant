@@ -39,9 +39,10 @@
 - **Implementation:** `httpx` streaming download.
 
 ### `control_media_player`
-- **Description:** Manages media playback and libraries (e.g. iTunes/Apple Music / Windows Media Player): play, pause, skip, add file to library.
-- **Input Schema:** `action: str` ("play", "pause", "next", "previous", "add_to_library"), `media_path: str = ""`
-- **Implementation:** GUI automation (`pyautogui`) + platform media keys (`pynput`).
+- **Description:** Manages media playback and libraries (e.g. iTunes/Apple Music): play, pause, skip, shuffle, or **play a specific song/artist/album** searched in the iTunes library.
+- **Input Schema:** `action: str` ("play" | "pause" | "next" | "previous" | "stop" | "play_track" | "add_to_library"), `media_path: str = ""`, `shuffle: bool = False`, `track_name: str = ""` (song/artist/album, for play_track), `search_field: str = "all"` ("all" | "song" | "artist" | "album")
+- **Implementation:** iTunes COM automation (`pywin32`, `LibraryPlaylist.Search`) with media-keys fallback (`pyautogui`). `play_track` auto-launches iTunes if closed and plays the best match; falls back to searching all fields if the specific field yields nothing.
+- **Safety Policy:** Read-only search + playback; no library modification.
 
 ### `send_whatsapp_message`
 - **Description:** Opens WhatsApp (desktop app or WhatsApp Web via Playwright), selects a contact, and sends a dictated message.
@@ -73,9 +74,9 @@
 - **Implementation:** `httpx` / `urllib` XML parsing for ArXiv API.
 
 ### `fetch_web_content`
-- **Description:** Performs lightweight web search or fetches raw content from specific URLs.
+- **Description:** Performs lightweight web search or fetches raw content from specific URLs. By default every web search **also opens the Google results in the browser** while MERLIN summarizes the findings (disable with `MERLIN_OPEN_BROWSER_ON_SEARCH=0`).
 - **Input Schema:** `url_or_query: str`
-- **Implementation:** Tavily / DuckDuckGo API or `httpx` web scraping.
+- **Implementation:** DuckDuckGo search (`ddgs`, no API key) / Tavily / `httpx` web scraping.
 
 ---
 
