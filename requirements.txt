@@ -1,0 +1,29 @@
+# Agentic engine & LLM connector (LM Studio via OpenAI-compatible API)
+langgraph>=0.2.0
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
+langchain-openai>=0.2.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Voice pipeline (bilingual: es/en auto-detect STT, Piper TTS es_ES + en_GB)
+openwakeword>=0.6.0
+faster-whisper>=1.0.0
+piper-tts>=1.2.0
+PyAudio>=0.2.14
+
+# System, automation & interface (near-total control model)
+psutil>=5.9.0
+pyautogui>=0.9.54
+pynput>=1.7.6
+customtkinter>=5.2.0
+send2trash>=1.8.0
+
+# Web connectivity & utilities
+httpx>=0.27.0
+uvicorn>=0.30.0
+fastapi>=0.111.0
+
+# Packaging (build-time only, Windows installer target)
+pyinstaller>=6.0.0
