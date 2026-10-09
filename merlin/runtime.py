@@ -40,17 +40,19 @@ class MerlinRuntime:
     def is_busy(self) -> bool:
         return self._busy.locked()
 
-    def _initial_state(self, query: str, voice_mode: bool) -> GraphState:
+    def _initial_state(self, query: str, voice_mode: bool,
+                       speak: bool = False) -> GraphState:
         config = get_config()
         return {
             "input_query": query,
             "voice_mode": voice_mode,
+            "speak": speak or voice_mode,  # headless voice loop speaks too
             "chat_history": load_recent_chat(config.max_chat_history_messages),
             "error_logs": [],
             "detected_language": detect_language(query, config.default_language),
         }
 
-    def submit(self, query: str, voice_mode: bool = False,
+    def submit(self, query: str, voice_mode: bool = False, speak: bool = False,
                on_done: Optional[callable] = None) -> bool:
         """Run one graph turn in a daemon thread. Returns False if busy."""
         if not self._busy.acquire(blocking=False):
@@ -60,7 +62,7 @@ class MerlinRuntime:
         def worker() -> None:
             try:
                 mark_turn_start()
-                self.graph.invoke(self._initial_state(query, voice_mode))
+                self.graph.invoke(self._initial_state(query, voice_mode, speak))
             except Exception as exc:
                 logger.exception("Graph turn crashed")
                 post_event("error", f"Internal error: {exc}")
@@ -72,7 +74,8 @@ class MerlinRuntime:
         threading.Thread(target=worker, daemon=True, name="merlin-turn").start()
         return True
 
-    def submit_sync(self, query: str, voice_mode: bool = False) -> dict:
+    def submit_sync(self, query: str, voice_mode: bool = False,
+                    speak: bool = False) -> dict:
         """Synchronous invocation (CLI / smoke tests)."""
         mark_turn_start()
-        return self.graph.invoke(self._initial_state(query, voice_mode))
+        return self.graph.invoke(self._initial_state(query, voice_mode, speak))

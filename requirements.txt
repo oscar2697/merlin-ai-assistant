@@ -9,9 +9,10 @@ python-dotenv>=1.0.0
 
 # Voice pipeline (bilingual: es/en auto-detect STT, Piper TTS es_ES + en_GB)
 openwakeword>=0.6.0
-faster-whisper>=1.0.0
+faster-whisper>=1.2.0
+av==13.1.0  # pinned: PyAV >= 14 breaks faster-whisper's decode_audio
 piper-tts>=1.2.0
-PyAudio>=0.2.14
+sounddevice>=0.4.6  # PortAudio capture/playback (PyAudio has no cp313 wheels)
 
 # System, automation & interface (near-total control model)
 psutil>=5.9.0

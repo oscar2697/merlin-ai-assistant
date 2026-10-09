@@ -1,6 +1,9 @@
 # Secrets
 .env
 
+# Personal data (real phone numbers live only on this machine)
+merlin/whatsapp_contacts.json
+
 # Python
 __pycache__/
 *.pyc

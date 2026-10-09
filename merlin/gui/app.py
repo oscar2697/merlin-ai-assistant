@@ -119,7 +119,7 @@ class MerlinApp(ctk.CTk):
             return
         if not voice_tools.wake_word_available():
             self.voice_mode.set(False)
-            self._append("Wake word unavailable (openwakeword/pyaudio missing). "
+            self._append("Wake word unavailable (openwakeword/sounddevice missing). "
                          "Use the 🎙 button for push-to-talk.\n", _ERROR_TAG)
             return
         self._wake_stop = threading.Event()  # fresh event: an old loop keeps its own
@@ -189,7 +189,9 @@ class MerlinApp(ctk.CTk):
 
         text = result["text"]
         post_event("user_input", text)  # shown as "You (voice): ..."
-        return self.runtime.submit(text, voice_mode=False)
+        # speak=True: MERLIN answers out loud (streaming TTS); the turn still
+        # ends after TTS (voice_mode stays False - the GUI wake loop owns listening).
+        return self.runtime.submit(text, voice_mode=False, speak=True)
 
     # ---------------------------------------------------------------- events
     def _poll_events(self) -> None:

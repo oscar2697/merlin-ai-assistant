@@ -7,6 +7,7 @@ from merlin.events import post_event
 from merlin.langdetect import detect_language
 from merlin.llm import get_llm
 from merlin.state import GraphState
+from merlin.tools.voice_tools import get_speech_queue, set_current_language, split_sentences
 
 logger = logging.getLogger("merlin.agents.direct_response")
 
@@ -28,10 +29,26 @@ def direct_response_node(state: GraphState) -> dict:
     fallback = ("I'm running offline right now (LM Studio unreachable), but I "
                 f"heard you: \"{query}\". Please start the LM Studio server to "
                 "enable full conversation.")
+
+    # Voice input: speak each sentence as it finishes generating (streaming TTS)
+    spoken = {"chars": 0}
+    if state.get("voice_mode") or state.get("speak"):
+        set_current_language(language)
+        speech = get_speech_queue()
+        speech.begin_turn()
+
+        def on_token(partial: str) -> None:
+            post_event("merlin_partial", partial)
+            sentences, spoken["chars"] = split_sentences(partial, spoken["chars"])
+            for sentence in sentences:
+                speech.enqueue(sentence)
+    else:
+        def on_token(partial: str) -> None:
+            post_event("merlin_partial", partial)
+
     post_event("status", "thinking... (Gemma reasoning)")
     updates["final_response"] = get_llm().chat(
-        messages, fallback=fallback,
-        on_token=lambda partial: post_event("merlin_partial", partial)).strip()
+        messages, fallback=fallback, on_token=on_token).strip()
     return updates
 
 

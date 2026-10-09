@@ -14,7 +14,8 @@ class GraphState(TypedDict, total=False):
     error_logs: List[str]      # captured exceptions or failures
     system_prompt_override: str  # dynamic prompt adjusted by self-improvement
     detected_language: str     # "es" | "en" (drives Piper voice selection)
-    voice_mode: bool           # True => voice loop continues after TTS
+    voice_mode: bool           # True => headless voice loop continues after TTS
+    speak: bool                # True => TTS speaks the answer (GUI voice input)
 
 
 def append_to(state: dict, key: str, item) -> dict:

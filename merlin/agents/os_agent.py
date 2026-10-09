@@ -4,22 +4,62 @@ The agent plans a tool call with Gemma (structured JSON); when the LLM is
 offline it falls back to deterministic keyword heuristics so the graph never
 dead-ends. Obvious commands ("open X and play", "how much RAM", "search X") are
 planned with keywords and answered locally, so they need zero LLM calls.
+
+Sending a WhatsApp message asks for a spoken yes/no first (MERLIN_CONFIRM_SEND=0
+disables it): voice transcription is never 100% reliable and a message to the
+wrong person cannot be undone.
 """
 from __future__ import annotations
 
 import inspect
 import json
 import logging
+import os
 import re
 import time
 
+from merlin import confirm
 from merlin.events import post_event
 from merlin.langdetect import detect_language
 from merlin.llm import get_llm
 from merlin.state import GraphState, append_to
-from merlin.tools import system_tools
+from merlin.tools import system_tools, whatsapp_tools, writing_tools
 
 logger = logging.getLogger("merlin.agents.os_agent")
+
+# LLM profile that writes the text pasted into documents. "fast" is the profile
+# already used below for short answers; set to None to use the default model.
+_WRITER_PROFILE = "fast"
+
+_WRITER_SYSTEM = (
+    "You write text that will be pasted straight into a document. Reply in the "
+    "same language as the request. Output ONLY the requested text: no title, no "
+    "preface, no markdown, no quotes, no closing remarks.")
+
+
+def _generate_text(instruction: str) -> str:
+    llm = get_llm(_WRITER_PROFILE) if _WRITER_PROFILE else get_llm()
+    text = (llm.chat(
+        [{"role": "system", "content": _WRITER_SYSTEM},
+         {"role": "user", "content": instruction}],
+        fallback="") or "").strip()
+    text = re.sub(r"\*\*|__|`", "", text)                # stray markdown
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+    return text.strip()
+
+
+def _write_text(app_name: str = "", instruction: str = "", text: str = "") -> dict:
+    """Write `text` (or text generated for `instruction`) into an app window."""
+    text = (text or "").strip()
+    if not text:
+        if not (instruction or "").strip():
+            return {"ok": False, "error": "Nothing to write: no text or instruction."}
+        text = _generate_text(instruction)
+        if not text:
+            return {"ok": False,
+                    "error": "I could not generate the text (is the LLM running?)."}
+    return writing_tools.type_into_app(app_name, text)
+
 
 _OS_TOOLS = {
     "control_system_resource": system_tools.control_system_resource,
@@ -29,8 +69,9 @@ _OS_TOOLS = {
     "manage_files": system_tools.manage_files,
     "download_file": system_tools.download_file,
     "control_media_player": system_tools.control_media_player,
-    "send_whatsapp_message": system_tools.send_whatsapp_message,
+    "send_whatsapp_message": whatsapp_tools.send_whatsapp_message,
     "search_web": system_tools.search_web,
+    "write_text": _write_text,
 }
 
 # Only these tools need the LLM to explain a successful result (their output is
@@ -43,7 +84,8 @@ _APP_LAUNCH_WAIT = 4.0
 # Names small models often use instead of the real parameter names.
 _ARG_ALIASES = {"app": "app_name", "application": "app_name", "name": "app_name",
                 "cmd": "command", "path": "source",
-                "track": "track_name", "song": "track_name"}
+                "track": "track_name", "song": "track_name",
+                "topic": "instruction", "prompt": "instruction"}
 
 _STEP_SPLIT = re.compile(
     r"\s+(?:y luego|y después|y despues|and then|then|luego|después|despues|y|and)\s+")
@@ -73,10 +115,36 @@ _SEARCH_RE = re.compile(
     r"(.+?)"
     r"(?:\s+(?:en|in|on|con)\s+(?:google\s+chrome|google|chrome|internet|la\s+web|the\s+web))?\s*$")
 
+# "escribe/describe un párrafo sobre X (en Word)" -> write_text
+_WRITE_VERB_RE = re.compile(r"\b(?:escrib\w+|redact\w+|describ\w+|write|draft|compose)\b")
+_WRITE_NOUN_RE = re.compile(
+    r"\b(?:p[aá]rrafo|paragraph|texto|text|resumen|summary|ensayo|essay|carta|letter|"
+    r"poema|poem|correo|email|art[ií]culo|article|historia|story)\b")
+# (what the user says, text expected in the window title)
+_WRITE_APPS = (("wordpad", "WordPad"), ("word", "Word"),
+               ("bloc de notas", "Bloc de notas"), ("notepad", "Notepad"),
+               ("onenote", "OneNote"), ("outlook", "Outlook"),
+               ("excel", "Excel"), ("powerpoint", "PowerPoint"))
+
+# WhatsApp: "dile a mamá que ya voy", "envía un mensaje por WhatsApp a Juan diciendo hola"
+_WA_PATTERNS = (
+    re.compile(r"\b(?:dile|d[ií]gale|escr[ií]bele|m[aá]ndale|env[ií]ale)\s+(?:a\s+)?"
+               r"(?P<contact>.+?)\s+(?:que|diciendo|preguntando|:)\s*(?P<message>.+)$",
+               re.IGNORECASE),
+    re.compile(r"\b(?:env[ií]a\w*|manda\w*|escrib\w+)\s+(?:un\s+|el\s+)?(?:mensaje|whatsapp)"
+               r"(?:\s+(?:de|por|en)\s+whatsapp)?\s+(?:a|para)\s+(?P<contact>.+?)\s+"
+               r"(?:diciendo|preguntando|que(?:\s+(?:diga|dice))?|:)\s*(?P<message>.+)$",
+               re.IGNORECASE),
+    re.compile(r"\bsend\s+(?:a\s+)?(?:whatsapp\s+)?(?:message\s+)?(?:on\s+whatsapp\s+)?to\s+"
+               r"(?P<contact>.+?)\s+(?:saying|that\s+says|asking|:)\s*(?P<message>.+)$",
+               re.IGNORECASE),
+)
+
 _PLANNER_PROMPT = (
     "You are the action planner of MERLIN's OS agent. Choose ONE tool to "
     "satisfy the user request and return STRICT JSON, no prose, no markdown. "
-    "Put the arguments at the top level next to \"tool\", exactly as named below.\n"
+    "Put the arguments at the top level next to \"tool\", exactly as named below. "
+    "To write or type text into an app ALWAYS use write_text, never interact_gui_app.\n"
     "Available tools and required args:\n"
     '- control_system_resource: {{"tool": "control_system_resource", "action": "ram"|"cpu"|"battery"|"processes"}}\n'
     '- execute_terminal_command: {{"tool": "execute_terminal_command", "command": str, "timeout_seconds": int}}\n'
@@ -87,6 +155,7 @@ _PLANNER_PROMPT = (
     '- control_media_player: {{"tool": "control_media_player", "action": "play"|"pause"|"next"|"previous"|"play_track"|"add_to_library", "media_path": str, "shuffle": bool, "track_name": str (song/artist/album for play_track), "search_field": "all"|"song"|"artist"|"album"}}\n'
     '- send_whatsapp_message: {{"tool": "send_whatsapp_message", "contact": str, "message": str}}\n'
     '- search_web: {{"tool": "search_web", "query": str}}\n'
+    '- write_text: {{"tool": "write_text", "app_name": str (window to write in, e.g. "Word"; "" = the window the user was in), "instruction": str (what to write, e.g. "a paragraph about computer networks"), "text": str (exact text, optional)}}\n'
     'If nothing fits, return {{"tool": "none"}}.\n\n'
     "User request: {query}\nJSON:"
 )
@@ -123,6 +192,41 @@ def _plan_with_llm(query: str) -> dict | None:
     except json.JSONDecodeError:
         pass
     return None
+
+
+def _whatsapp_plan(query: str) -> dict | None:
+    """'dile a mamá que ya voy' -> send_whatsapp_message(contact='mamá', message='ya voy')."""
+    q = query.strip()
+    for pattern in _WA_PATTERNS:
+        m = pattern.search(q)
+        if not m:
+            continue
+        contact = re.sub(r"\s+(?:por|en|de|on|via)\s+whatsapp\b.*$", "",
+                         m.group("contact"), flags=re.IGNORECASE)
+        contact = re.sub(r"^(?:mi|mis|el|la|my)\s+", "",
+                         contact.strip(" ,.:;\"'"), flags=re.IGNORECASE).strip()
+        message = m.group("message").strip(" \"'«»").rstrip(" .")
+        if contact and message:
+            return {"tool": "send_whatsapp_message", "contact": contact,
+                    "message": message}
+    return None
+
+
+def _write_plan(query: str) -> dict | None:
+    """'...puedes describir un párrafo sobre las redes' (+ Word) -> write_text."""
+    q = query.lower()
+    verb = _WRITE_VERB_RE.search(q)
+    if not verb:
+        return None
+    app = ""
+    for key, title in _WRITE_APPS:
+        if re.search(rf"\b{re.escape(key)}\b", q):
+            app = title
+            break
+    if not app and not _WRITE_NOUN_RE.search(q):
+        return None
+    instruction = query[verb.start():].strip(" ?.,!¿¡")
+    return {"tool": "write_text", "app_name": app, "instruction": instruction}
 
 
 def _search_plan(q: str) -> dict | None:
@@ -163,16 +267,16 @@ def _play_specific_plan(q: str) -> dict | None:
 
 def _plan_with_keywords(query: str) -> dict:
     q = query.lower()
-    if "whatsapp" in q:
-        contact = _extract_after(q, ["to ", "a ", "para "]) or "contact"
-        message = _extract_after(q, ["saying ", "asking ", "que ", "preguntando "])
-        if "message" in q or "mensaje" in q or message:
-            return {"tool": "send_whatsapp_message",
-                    "contact": contact.title(), "message": message or query}
+    wa = _whatsapp_plan(query)
+    if wa:
+        return wa
     url = re.search(r"https?://\S+", query)
     if url and ("download" in q or "descarga" in q):
         return {"tool": "download_file", "url": url.group(0),
                 "destination_folder": "Downloads"}
+    writing = _write_plan(query)
+    if writing:
+        return writing
     search = _search_plan(q)
     if search:
         return search
@@ -211,7 +315,8 @@ def _fast_clause_plan(clause: str) -> dict | None:
     words = len(clause.split())
     if tool == "open_app" and len(plan.get("app_name", "").split()) <= 3:
         return plan
-    if tool in ("control_system_resource", "search_web"):
+    if tool in ("control_system_resource", "search_web", "write_text",
+                "send_whatsapp_message"):
         return plan
     if tool == "control_media_player" and plan.get("action") != "add_to_library" \
             and (words <= 7 or (plan.get("action") == "play_track" and words <= 12)):
@@ -223,6 +328,13 @@ def _fast_steps(query: str) -> list | None:
     """Split 'open X and play' into clauses; return plans only if EVERY clause is
     understood without the LLM (otherwise None -> the LLM plans the whole thing)."""
     q = query.lower()
+    wa = _whatsapp_plan(query)  # the message may contain "y"/"and": don't split it
+    if wa:
+        return [wa]
+    if not re.search(r"\b(?:abre|abrir|open|launch)\b", q):
+        writing = _write_plan(query)  # the text to write may contain "y"/"and"
+        if writing:
+            return [writing]
     single = _search_plan(q)  # a search topic may contain "y"/"and": don't split it
     if single:
         return [single]
@@ -243,6 +355,31 @@ def _extract_after(text: str, markers: list) -> str:
         if marker in text:
             return text.split(marker, 1)[1].strip()[:200]
     return ""
+
+
+def _confirm_send_enabled() -> bool:
+    return os.environ.get("MERLIN_CONFIRM_SEND", "1") != "0"
+
+
+def _ask_whatsapp_confirmation(plan: dict, language: str) -> str | None:
+    """Store the message as pending and return the spoken question.
+    Returns None when the tool should just run (it explains a missing contact).
+
+    The spoken contact name is kept in the plan: the in-app search must use
+    whatever the user calls the contact (chats are listed by the user's names).
+    """
+    es = str(language).lower().startswith("es")
+    contact = plan.get("contact", "")
+    message = plan.get("message", "")
+    found = whatsapp_tools.resolve_contact(contact)
+    if found is None and not whatsapp_tools.search_enabled():
+        return None  # the tool itself explains that the number is missing
+    confirm.set_pending({"plan": plan, "language": language})
+    if es:
+        return (f"Voy a enviar a {contact} el mensaje: {message}. "
+                f"¿Lo envío? Dime sí o no.")
+    return (f"I'm about to send {contact} the message: {message}. "
+            f"Shall I send it? Say yes or no.")
 
 
 def _run_step(plan: dict) -> tuple[str, dict, dict]:
@@ -273,9 +410,29 @@ def os_agent_node(state: GraphState) -> dict:
                      or detect_language(query)}
     language = updates["detected_language"] or "en"
 
-    steps = _fast_steps(query)
+    # A pending yes/no (WhatsApp send confirmation) takes priority over any
+    # new plan; anything else the user says cancels the pending action.
+    steps = None
+    confirmed = False
+    pending = confirm.peek_pending()
+    if pending:
+        reply = confirm.classify_reply(query)
+        confirm.clear_pending()  # any other request replaces the pending action
+        if reply:
+            language = pending.get("language") or language
+        if reply == "yes":
+            steps = [pending["plan"]]
+            confirmed = True
+        elif reply == "no":
+            es = str(language).lower().startswith("es")
+            updates["final_response"] = ("De acuerdo, lo cancelé." if es
+                                         else "Okay, I cancelled it.")
+            return updates
+
     if steps is None:
-        steps = [_plan_with_llm(query) or _plan_with_keywords(query)]
+        steps = _fast_steps(query)
+        if steps is None:
+            steps = [_plan_with_llm(query) or _plan_with_keywords(query)]
 
     if steps[0].get("tool", "none") == "none":
         updates["final_response"] = (
@@ -283,13 +440,21 @@ def os_agent_node(state: GraphState) -> dict:
             "Try naming the app, resource or command explicitly.")
         return updates
 
+    if (not confirmed and len(steps) == 1 and _confirm_send_enabled()
+            and steps[0].get("tool") == "send_whatsapp_message"):
+        ask = _ask_whatsapp_confirmation(steps[0], language)
+        if ask:
+            updates["final_response"] = ask
+            return updates
+
     calls, results, summaries = [], [], []
     for i, plan in enumerate(steps):
         if i and calls[-1]["tool"] == "open_app" and results[-1].get("ok"):
             time.sleep(_APP_LAUNCH_WAIT)  # let the app finish opening
         tool_name, args, result = _run_step(plan)
         logger.info("OS step: %s %s -> %s", tool_name, args,
-                    {k: v for k, v in result.items() if k in ("ok", "method", "error")})
+                    {k: v for k, v in result.items()
+                     if k in ("ok", "method", "error", "window", "chars", "sent")})
         calls.append({"tool": tool_name, "args": args})
         results.append(result)
         summaries.append(_summarize(tool_name, result, language))
@@ -349,6 +514,11 @@ def _summarize(tool: str, result: dict, language: str) -> str:
     if tool == "open_app":
         app = result.get("app")
         return f"Abriendo {app}." if es else f"Opening {app}."
+    if tool == "write_text":
+        where = result.get("app") or result.get("window") or ""
+        if es:
+            return f"Listo, escribí el texto en {where}." if where else "Listo, escribí el texto."
+        return f"Done, I wrote the text in {where}." if where else "Done, I wrote the text."
     if tool == "search_web":
         q = result.get("query")
         return (f"Abrí la búsqueda de «{q}» en Chrome." if es
@@ -369,8 +539,13 @@ def _summarize(tool: str, result: dict, language: str) -> str:
             return "Reproduciendo en modo aleatorio." if es else "Playing on shuffle."
         return f"Listo: {action}." if es else f"Done: {action}."
     if tool == "send_whatsapp_message":
-        return (f"WhatsApp message sent to {result.get('contact')}: "
-                f"\"{result.get('message')}\"")
+        who = result.get("contact")
+        sent = result.get("sent", True)
+        if es:
+            return (f"Mensaje enviado a {who}." if sent else
+                    f"Dejé el mensaje escrito para {who}; solo falta enviarlo.")
+        return (f"Message sent to {who}." if sent else
+                f"I left the message typed for {who}; it is ready to send.")
     if tool == "download_file":
         return (f"Downloaded to {result.get('path')} "
                 f"({result.get('size_mb')} MB).")

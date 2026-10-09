@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import logging
-import threading
 
 from merlin.config import get_config
 from merlin.events import post_event
 from merlin.persistence import append_chat_message, append_execution_log, now_ms
 from merlin.state import GraphState
-from merlin.tools import voice_tools
+from merlin.tools.voice_tools import get_speech_queue, set_current_language
 
 logger = logging.getLogger("merlin.agents.tts_responder")
 
@@ -21,12 +20,13 @@ def tts_responder_node(state: GraphState) -> dict:
     language = state.get("detected_language") or get_config().default_language
     query = state.get("input_query", "")
 
-    # Non-blocking TTS: speak in a daemon thread so the graph keeps flowing
-    if state.get("voice_mode") and response:
-        threading.Thread(
-            target=voice_tools.synthesize_speech_tts,
-            args=(response, language), daemon=True,
-        ).start()
+    # Voice input (GUI) sets speak=True: if direct_response already streamed
+    # sentences into the SpeechQueue, only the remainder is spoken here;
+    # speak_remainder blocks until playback drains so the mic never hears
+    # MERLIN's own answer. voice_mode (headless loop) implies speaking too.
+    if (state.get("voice_mode") or state.get("speak")) and response:
+        set_current_language(language)
+        get_speech_queue().speak_remainder(response, language)
 
     if query:
         append_chat_message("user", query)

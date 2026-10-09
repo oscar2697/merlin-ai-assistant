@@ -5,6 +5,7 @@ import logging
 import os
 import re
 
+from merlin import confirm
 from merlin.llm import get_llm
 from merlin.state import GraphState
 
@@ -40,6 +41,22 @@ KEYWORD_MAP = {
         "news",
     ),
 }
+
+# "dile a mamá que...", "envía un mensaje a Juan...", "send a message to ..."
+# -> send a WhatsApp message (os_agent).
+_MESSAGE_INTENT = re.compile(
+    r"\b(?:dile|d[ií]gale|escr[ií]bele|m[aá]ndale|env[ií]ale)\s+a\b"
+    r"|\b(?:env[ií]a\w*|manda\w*)\s+(?:un\s+)?(?:mensaje|whatsapp)\b"
+    r"|\bsend\s+(?:a\s+)?(?:whatsapp\s+)?message\s+to\b",
+    re.IGNORECASE)
+
+# "escribe/redacta/describe ... en Word" -> write text into a desktop app.
+# Both parts are required: a bare "describe cómo funciona X" is just a question.
+_WRITE_VERB = re.compile(
+    r"\b(?:escrib\w+|redact\w+|describ\w+|write|draft|compose)\b", re.IGNORECASE)
+_WRITE_APP = re.compile(
+    r"\b(?:word|wordpad|bloc\s+de\s+notas|notepad|onenote|outlook|excel|powerpoint)\b",
+    re.IGNORECASE)
 
 # "busca ... / search ..." goes to the web agent, unless the request is really
 # about files, music or WhatsApp ("busca el archivo...", "busca la canción...").
@@ -79,6 +96,17 @@ _CLASSIFIER_PROMPT = (
 def route_query(query: str) -> str:
     """Step 1: keyword match (zero tokens). Step 2 (opt-in): LLM classification."""
     q = (query or "").lower()
+    if confirm.has_pending():
+        if confirm.classify_reply(query):
+            logger.info("Router: yes/no to a pending action -> %s", ROUTE_OS)
+            return ROUTE_OS
+        confirm.clear_pending()  # any other request cancels the pending action
+    if _MESSAGE_INTENT.search(q):
+        logger.info("Router: message intent -> %s", ROUTE_OS)
+        return ROUTE_OS
+    if _WRITE_VERB.search(q) and _WRITE_APP.search(q):
+        logger.info("Router: write-into-app intent -> %s", ROUTE_OS)
+        return ROUTE_OS
     if _SEARCH_INTENT.search(q) and not _NOT_WEB_NOUNS.search(q):
         logger.info("Router: search intent -> %s", ROUTE_WEB)
         return ROUTE_WEB

@@ -31,11 +31,14 @@ class MerlinConfig:
     llm_max_tokens: int = 1500       # reasoning tokens + answer tokens
 
     # --- Voice pipeline (bilingual, offline) ---
-    wake_words: tuple = ("merlin", "arthur")
+    # Interim wake phrase: "hey jarvis" (openwakeword pretrained; the project
+    # was codenamed JARVIS). A custom "Merlin"/"Arthur" model is a pending
+    # openwakeword training task.
+    wake_words: tuple = ("merlin", "arthur", "jarvis")
     whisper_model_size: str = "small"  # "small" | "medium" (CPU int8)
     piper_voices: dict = field(
         default_factory=lambda: {
-            "es": "es_ES-sharpest-medium",
+            "es": "es_ES-sharvard-medium",
             "en": "en_GB-alan-medium",  # British English per user requirement
         }
     )

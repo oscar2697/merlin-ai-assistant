@@ -45,9 +45,10 @@
 - **Safety Policy:** Read-only search + playback; no library modification.
 
 ### `send_whatsapp_message`
-- **Description:** Opens WhatsApp (desktop app or WhatsApp Web via Playwright), selects a contact, and sends a dictated message.
-- **Input Schema:** `contact: str`, `message: str`
-- **Implementation:** WhatsApp Desktop GUI automation with Playwright (WhatsApp Web) fallback.
+- **Description:** Opens the WhatsApp chat of a specific contact and sends a dictated message (e.g. "dile a mamá que ya voy").
+- **Input Schema:** `contact: str` (spoken name, e.g. "mamá"), `message: str`
+- **Implementation:** **In-app search flow** (works on the Microsoft Store build, which ignores `whatsapp://send` parameters): focus WhatsApp → `Ctrl+F` → paste the contact name → Enter (first result) → Escape → click the message box (bottom-centre of the window rect) → paste the message → Enter. Non-Store builds with a known phone number (`whatsapp_contacts.json`) use the deep link with pre-filled text. `MERLIN_WHATSAPP_METHOD=search|deeplink` forces a method; `MERLIN_WHATSAPP_AUTOSEND=0` leaves the text typed without sending.
+- **Caveat:** if the contact has no chat in the list, the paste would land in the previously open chat; the flow assumes the contact exists.
 - **Safety Policy:** Sending is allowed on voice command (near-total control model); message text is read back for confirmation when time permits.
 
 ---
@@ -82,14 +83,17 @@
 
 ## 4. Voice Pipeline Skills (Offline & Local)
 
+> Implemented in Hito 3. Capture via `sounddevice` (PortAudio; PyAudio has no Python 3.13 wheels). Voices are stored in `~/merlin/voices/` and downloaded by `scripts/download_voices.py` (also auto-downloaded on first use).
+
 ### `listen_wake_word`
-- **Description:** Runs a background listener waiting for the wake word "Merlin" or "Arthur" using minimal CPU resources.
-- **Implementation:** `openWakeWord` stream listener.
+- **Description:** Runs a background listener waiting for the wake word using minimal CPU resources. Supports a `stop_event` so the GUI can cancel the wait.
+- **Implementation:** `openwakeword` (onnxruntime backend on Windows). **Interim wake phrase: "hey Jarvis"** (pretrained model; the project was codenamed JARVIS). A custom "Merlin"/"Arthur" openwakeword model is a pending training task.
 
 ### `transcribe_audio_stt`
-- **Description:** Converts recorded speech buffer to text using an optimized local Whisper binary. **Bilingual**: automatic Spanish/English detection.
-- **Implementation:** `faster-whisper` (Model: `small` or `medium`, `language=None` for auto-detect es/en).
+- **Description:** Converts recorded speech to text. **Bilingual**: automatic Spanish/English detection (validated by TTS->STT round trip).
+- **Implementation:** `faster-whisper` (model `small`, CPU int8, `language=None` auto-detect; requires `av==13.1.0` pinned - PyAV >= 14 breaks decode_audio).
 
 ### `synthesize_speech_tts`
-- **Description:** Converts model response text into natural audio output. **Bilingual voices**: `es_ES-*` (Spanish) and `en_GB-*` (British English, per user requirement).
-- **Implementation:** `Piper TTS` (offline C++/Python binding), voice selected by detected response language.
+- **Description:** Converts model response text into natural audio output. **Bilingual voices**: `es_ES-sharvard-medium` (Spanish) and `en_GB-alan-medium` (British English, per user requirement).
+- **Implementation:** `piper-tts` (`synthesize_wav`) -> temp WAV -> playback via `winsound` (Windows) / `aplay` (Linux) / `afplay` (macOS). Voice selected by detected response language.
+- **Streaming TTS (`SpeechQueue`)**: in voice turns, finished sentences are spoken **while the LLM keeps generating** the rest of the answer; the TTS responder speaks only the remainder and blocks until playback drains (the mic never hears MERLIN's own answer). Verified end-to-end: the answer starts sounding seconds after the first sentence exists instead of after the full ~60 s generation.

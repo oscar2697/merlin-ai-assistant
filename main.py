@@ -78,7 +78,9 @@ def run_cli() -> None:
 
 def run_gui() -> None:
     from merlin.gui import run_gui as launch
+    from merlin.greeting import greet_async
     runtime = MerlinRuntime()
+    greet_async()  # formal, time-aware greeting (chat + voice)
     launch(runtime)
 
 

@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to merlin/whatsapp_contacts.json and fill with your real contacts. A value can be a phone string, or an object with 'chat' = the EXACT chat name in WhatsApp (use it when the spoken name differs from the chat's display name, so a spoken 'mamá' opens the chat saved as 'mom', never a similar-looking group). Phones: digits only, with country code.",
+  "mom": "590000000000",
+  "mamá": { "phone": "590000000000", "chat": "mom" },
+  "dad": "590000000001",
+  "papá": { "phone": "590000000001", "chat": "dad" },
+  "friend full name": "590000000002"
+}
