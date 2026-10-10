@@ -70,9 +70,13 @@ _OS_TOOLS = {
     "download_file": system_tools.download_file,
     "control_media_player": system_tools.control_media_player,
     "send_whatsapp_message": whatsapp_tools.send_whatsapp_message,
+    "call_whatsapp_contact": whatsapp_tools.call_whatsapp_contact,
     "search_web": system_tools.search_web,
     "write_text": _write_text,
 }
+
+# Tools that need a spoken yes/no before running (irreversible/interruptive).
+_CONFIRM_TOOLS = {"send_whatsapp_message", "call_whatsapp_contact"}
 
 # Only these tools need the LLM to explain a successful result (their output is
 # free-form). Everything else is answered with a local one-liner.
@@ -140,6 +144,26 @@ _WA_PATTERNS = (
                re.IGNORECASE),
 )
 
+# WhatsApp calls: "llama a mamá", "llámale a papá", "hazle una videollamada a liz",
+# "call mom on whatsapp". Accented forms ("llámale") are matched with ll[aá]m.
+_WA_CALL_VERB_RE = re.compile(
+    r"\b(?:ll[aá]m\w+|marcar?|marc[aá]le|call|ring|videollam\w+)\b", re.IGNORECASE)
+_WA_CALL_PATTERNS = (
+    re.compile(r"\b(?:videollam(?:ada|ar|a)|video\s*call|video\s*llam(?:ada|ar))\b"
+               r".*?\b(?:a|to)\s+(?P<contact>.+?)"
+               r"(?:\s+(?:por|de|en|on|via)\s+whatsapp)?\s*$", re.IGNORECASE),
+    re.compile(r"\b(?:ll[aá]m(?:a|ar|ame|ale|ala|alo|ela)|marcar|marcale|call|ring)\b"
+               r"(?:\s+(?:a\s+)?(?:mamá|papá|un|una|le|la|lo))?"
+               r"(?:\s+(?:por|de|en|on|via)\s+whatsapp)?\s*"
+               r"(?:\s+a\s+|\s+to\s+)(?P<contact>.+?)\s*$", re.IGNORECASE),
+    re.compile(r"\b(?:haz(?:le)?|make|realiza)\s+(?:una?\s+)?"
+               r"(?P<vcall>videollamada|llamada|call)"
+               r".*?\b(?:a|to)\s+(?P<contact>.+?)"
+               r"(?:\s+(?:por|de|en|on|via)\s+whatsapp)?\s*$", re.IGNORECASE),
+    re.compile(r"\b(?:call|ring|phone)\s+(?P<contact>.+?)"
+               r"(?:\s+(?:por|de|en|on|via)\s+whatsapp)?\s*$", re.IGNORECASE),
+)
+
 _PLANNER_PROMPT = (
     "You are the action planner of MERLIN's OS agent. Choose ONE tool to "
     "satisfy the user request and return STRICT JSON, no prose, no markdown. "
@@ -154,6 +178,7 @@ _PLANNER_PROMPT = (
     '- download_file: {{"tool": "download_file", "url": str, "destination_folder": str}}\n'
     '- control_media_player: {{"tool": "control_media_player", "action": "play"|"pause"|"next"|"previous"|"play_track"|"add_to_library", "media_path": str, "shuffle": bool, "track_name": str (song/artist/album for play_track), "search_field": "all"|"song"|"artist"|"album"}}\n'
     '- send_whatsapp_message: {{"tool": "send_whatsapp_message", "contact": str, "message": str}}\n'
+    '- call_whatsapp_contact: {{"tool": "call_whatsapp_contact", "contact": str, "video": bool (true = video call, false = voice call)}}\n'
     '- search_web: {{"tool": "search_web", "query": str}}\n'
     '- write_text: {{"tool": "write_text", "app_name": str (window to write in, e.g. "Word"; "" = the window the user was in), "instruction": str (what to write, e.g. "a paragraph about computer networks"), "text": str (exact text, optional)}}\n'
     'If nothing fits, return {{"tool": "none"}}.\n\n'
@@ -174,6 +199,13 @@ def _normalize_plan(plan: dict) -> dict:
     for wrong, right in _ARG_ALIASES.items():
         if wrong in plan and right not in plan:
             plan[right] = plan.pop(wrong)
+    # WhatsApp tools: the model may call the recipient "name", "person", "to"...
+    if plan.get("tool") in ("call_whatsapp_contact", "send_whatsapp_message") \
+            and "contact" not in plan:
+        for key in ("app_name", "person", "to", "recipient", "contact_name"):
+            if key in plan:
+                plan["contact"] = plan.pop(key)
+                break
     return plan
 
 
@@ -209,6 +241,29 @@ def _whatsapp_plan(query: str) -> dict | None:
         if contact and message:
             return {"tool": "send_whatsapp_message", "contact": contact,
                     "message": message}
+    return None
+
+
+def _call_plan(query: str) -> dict | None:
+    """'llama a mamá' / 'hazle una videollamada a liz' -> call_whatsapp_contact."""
+    if not _WA_CALL_VERB_RE.search(query):
+        return None
+    video = bool(re.search(r"\bvideollam|video\s*call|video\s*llamada",
+                           query, re.IGNORECASE))
+    for pattern in _WA_CALL_PATTERNS:
+        m = pattern.search(query.strip(" ?.,!¿¡"))
+        if not m:
+            continue
+        contact = re.sub(r"\s+(?:por|de|en|on|via)\s+whatsapp\b.*$", "",
+                          m.group("contact"), flags=re.IGNORECASE)
+        # "llama a mamá y dile..." -> keep only the call; the trailing clause
+        # (", and tell her...") is not part of the contact name
+        contact = re.sub(r"\s+(?:y|and)\s+.*$", "", contact, flags=re.IGNORECASE)
+        contact = re.sub(r"^(?:mi|mis|el|la|my)\s+", "",
+                         contact.strip(" ,.:;\"'"), flags=re.IGNORECASE).strip()
+        if contact:
+            return {"tool": "call_whatsapp_contact", "contact": contact,
+                    "video": video}
     return None
 
 
@@ -270,6 +325,9 @@ def _plan_with_keywords(query: str) -> dict:
     wa = _whatsapp_plan(query)
     if wa:
         return wa
+    call = _call_plan(query)
+    if call:
+        return call
     url = re.search(r"https?://\S+", query)
     if url and ("download" in q or "descarga" in q):
         return {"tool": "download_file", "url": url.group(0),
@@ -316,7 +374,7 @@ def _fast_clause_plan(clause: str) -> dict | None:
     if tool == "open_app" and len(plan.get("app_name", "").split()) <= 3:
         return plan
     if tool in ("control_system_resource", "search_web", "write_text",
-                "send_whatsapp_message"):
+                "send_whatsapp_message", "call_whatsapp_contact"):
         return plan
     if tool == "control_media_player" and plan.get("action") != "add_to_library" \
             and (words <= 7 or (plan.get("action") == "play_track" and words <= 12)):
@@ -331,6 +389,9 @@ def _fast_steps(query: str) -> list | None:
     wa = _whatsapp_plan(query)  # the message may contain "y"/"and": don't split it
     if wa:
         return [wa]
+    call = _call_plan(query)  # "llama a mamá y dile que..." stays one plan
+    if call:
+        return [call]
     if not re.search(r"\b(?:abre|abrir|open|launch)\b", q):
         writing = _write_plan(query)  # the text to write may contain "y"/"and"
         if writing:
@@ -361,20 +422,30 @@ def _confirm_send_enabled() -> bool:
     return os.environ.get("MERLIN_CONFIRM_SEND", "1") != "0"
 
 
-def _ask_whatsapp_confirmation(plan: dict, language: str) -> str | None:
-    """Store the message as pending and return the spoken question.
+def _ask_action_confirmation(plan: dict, language: str) -> str | None:
+    """Store the action as pending and return the spoken question.
     Returns None when the tool should just run (it explains a missing contact).
+
+    Covers WhatsApp messages and (video) calls - both are irreversible.
 
     The spoken contact name is kept in the plan: the in-app search must use
     whatever the user calls the contact (chats are listed by the user's names).
     """
     es = str(language).lower().startswith("es")
     contact = plan.get("contact", "")
-    message = plan.get("message", "")
     found = whatsapp_tools.resolve_contact(contact)
     if found is None and not whatsapp_tools.search_enabled():
         return None  # the tool itself explains that the number is missing
     confirm.set_pending({"plan": plan, "language": language})
+    if plan.get("tool") == "call_whatsapp_contact":
+        kind = "videollamada" if plan.get("video") else "llamada"
+        if es:
+            return (f"Voy a hacerle una {kind} por WhatsApp a {contact}. "
+                    f"¿Llamo? Dime sí o no.")
+        kind = "video call" if plan.get("video") else "call"
+        return (f"I'm about to make a WhatsApp {kind} to {contact}. "
+                f"Shall I call? Say yes or no.")
+    message = plan.get("message", "")
     if es:
         return (f"Voy a enviar a {contact} el mensaje: {message}. "
                 f"¿Lo envío? Dime sí o no.")
@@ -441,8 +512,8 @@ def os_agent_node(state: GraphState) -> dict:
         return updates
 
     if (not confirmed and len(steps) == 1 and _confirm_send_enabled()
-            and steps[0].get("tool") == "send_whatsapp_message"):
-        ask = _ask_whatsapp_confirmation(steps[0], language)
+            and steps[0].get("tool") in _CONFIRM_TOOLS):
+        ask = _ask_action_confirmation(steps[0], language)
         if ask:
             updates["final_response"] = ask
             return updates
@@ -454,7 +525,8 @@ def os_agent_node(state: GraphState) -> dict:
         tool_name, args, result = _run_step(plan)
         logger.info("OS step: %s %s -> %s", tool_name, args,
                     {k: v for k, v in result.items()
-                     if k in ("ok", "method", "error", "window", "chars", "sent")})
+                     if k in ("ok", "method", "error", "window", "chars", "sent",
+                              "clicked", "cursor")})
         calls.append({"tool": tool_name, "args": args})
         results.append(result)
         summaries.append(_summarize(tool_name, result, language))
@@ -546,6 +618,22 @@ def _summarize(tool: str, result: dict, language: str) -> str:
                     f"Dejé el mensaje escrito para {who}; solo falta enviarlo.")
         return (f"Message sent to {who}." if sent else
                 f"I left the message typed for {who}; it is ready to send.")
+    if tool == "call_whatsapp_contact":
+        who = result.get("contact")
+        kind = "videollamada" if result.get("video") else "llamada"
+        if result.get("ok"):
+            if result.get("clicked") is False:  # dry run: nothing was dialled
+                return ("Modo de prueba: puse el cursor sobre el botón de "
+                        "llamada, sin llamar." if es else
+                        "Test mode: I placed the cursor on the call button "
+                        "without calling.")
+            if es:
+                return f"Haciéndole una {kind} por WhatsApp a {who}."
+            kind = "video call" if result.get("video") else "call"
+            return f"Making a WhatsApp {kind} to {who}."
+        if es:
+            return f"No pude iniciar la {kind} a {who}: {result.get('error', 'error')}"
+        return f"Could not start the call to {who}: {result.get('error', 'error')}"
     if tool == "download_file":
         return (f"Downloaded to {result.get('path')} "
                 f"({result.get('size_mb')} MB).")

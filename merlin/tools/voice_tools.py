@@ -188,21 +188,108 @@ def listen_wake_word(timeout_seconds: int = 60,
 
 
 # ----------------------------------------------------------------- recording
+def _endpoint_loop(read_chunk, max_chunks: int, chunk_ms: int = 64,
+                   silence_limit_ms: int = None, floor_min: float = 200.0,
+                   hard_speech: float = 1800.0):
+    """State machine: pull audio chunks until the user stops talking.
+
+    - Calibrates the noise floor while waiting for speech (running minimum).
+    - Speech = RMS above max(noise_floor * 3.5, floor_min), or above the hard
+      `hard_speech` level (clear voice near the mic) so that talking with no
+      quiet lead-in still counts as speech even before a floor exists.
+    - Keeps a pre-roll buffer so the first word is never clipped.
+    - Stops after `silence_limit_ms` of continuous silence once speech was seen.
+    Returns (chunks, spoke) without touching the microphone: `read_chunk` is
+    injectable, so the logic is unit-testable with synthetic audio.
+    """
+    import numpy as np
+    from collections import deque
+
+    config = get_config()
+    silence_limit = max(1, int((silence_limit_ms or config.silence_end_ms) / chunk_ms))
+    pre_roll = deque(maxlen=max(1, int(config.pre_speech_buffer_ms / chunk_ms)))
+    min_speech_chunks = max(1, int(500 / chunk_ms))  # real speech lasts >= 0.5 s
+
+    out: list = []
+    pre_roll.clear()
+    spoke = False
+    speech_chunks = 0
+    silence_run = 0
+    floor = None
+    quiet_wait = 0
+
+    for _ in range(max_chunks):
+        chunk = read_chunk()
+        if chunk is None:
+            break
+        rms = float(np.sqrt(np.mean(np.square(chunk.astype(np.float32)))))
+        is_speech = (rms > max((floor or 0) * 3.5, floor_min)
+                     or rms > hard_speech)
+
+        if not spoke:
+            pre_roll.append(chunk)
+            if floor is None:
+                floor = rms
+            else:
+                floor = min(floor, rms)  # noise floor only goes down pre-speech
+            quiet_wait += 1
+            if is_speech:
+                speech_chunks = 1
+                # require a sustained burst: single clicks (keys, bumps) are not speech
+                for old in list(pre_roll)[:-1]:
+                    out.append(old)
+                out.append(chunk)
+                spoke = True
+                quiet_wait = 0
+            elif quiet_wait >= max_chunks // 2:
+                break  # nothing said at all: stop waiting
+            continue
+
+        out.append(chunk)
+        if is_speech:
+            speech_chunks += 1
+            silence_run = 0
+        else:
+            silence_run += 1
+            if silence_run >= silence_limit and speech_chunks >= min_speech_chunks:
+                break
+
+    if not spoke or speech_chunks < min_speech_chunks:
+        return [], False
+    return out, True
+
+
 def record_audio(seconds: int = None) -> Path | None:
-    """Record N seconds of mic audio to a temp WAV file (16 kHz mono int16)."""
+    """Record the user's utterance with silence endpointing: MERLIN stops
+    listening ~1 s after you stop talking (hard cap: record_max_seconds).
+    Returns None if no speech was detected (or the mic is unavailable)."""
     try:
+        import numpy as np
         import sounddevice as sd
 
-        seconds = seconds or get_config().record_seconds
-        data = sd.rec(int(_SAMPLE_RATE * seconds), samplerate=_SAMPLE_RATE,
-                      channels=1, dtype="int16")
-        sd.wait()
+        config = get_config()
+        chunk_frames = 1024  # 64 ms at 16 kHz
+        max_s = seconds or config.record_max_seconds
+        max_chunks = int(max_s * _SAMPLE_RATE / chunk_frames)
+
+        with sd.InputStream(samplerate=_SAMPLE_RATE, channels=1, dtype="int16",
+                            blocksize=chunk_frames) as stream:
+            def read_chunk():
+                data, _overflowed = stream.read(chunk_frames)
+                return np.asarray(data)[:, 0]
+            chunks, spoke = _endpoint_loop(read_chunk, max_chunks)
+
+        if not spoke:
+            logger.info("record_audio: no speech detected")
+            return None
+        audio = np.concatenate(chunks)
         tmp = Path(tempfile.gettempdir()) / f"merlin_mic_{int(time.time())}.wav"
         with wave.open(str(tmp), "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(_SAMPLE_RATE)
-            wf.writeframes(data.tobytes())
+            wf.writeframes(audio.tobytes())
+        logger.info("record_audio: %.1f s of speech captured", len(audio) / _SAMPLE_RATE)
         return tmp
     except Exception as exc:
         logger.exception("record_audio failed")

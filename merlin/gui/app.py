@@ -106,8 +106,8 @@ class MerlinApp(ctk.CTk):
             self._append("The microphone is already in use "
                          "(voice mode is listening).\n", "info")
             return
-        seconds = get_config().record_seconds
-        self._append(f"Recording for {seconds} s - speak now...\n", "info")
+        seconds = get_config().record_max_seconds
+        self._append("Recording - speak now; I stop listening when you pause.\n", "info")
         threading.Thread(target=self._push_to_talk, daemon=True,
                          name="merlin-ptt").start()
 

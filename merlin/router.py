@@ -33,7 +33,8 @@ KEYWORD_MAP = {
         "descarga", "music", "música", "musica", "itunes", "whatsapp",
         "volume", "process", "apaga", "enciende", "reprodu", "canción",
         "cancion", "artista", "artist", "song", "playlist", "play",
-        "pause", "pausa",
+        "pause", "pausa", "llama", "llamar", "llám", "llamada",
+        "videollamada", "marc", "call",
     ),
     ROUTE_WEB: (
         "arxiv", "paper", "artículo", "articulo", "search", "buscar",

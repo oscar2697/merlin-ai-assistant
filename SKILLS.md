@@ -49,6 +49,12 @@
 - **Input Schema:** `contact: str` (spoken name, e.g. "mamá"), `message: str`
 - **Implementation:** **In-app search flow** (works on the Microsoft Store build, which ignores `whatsapp://send` parameters): focus WhatsApp → `Ctrl+F` → paste the contact name → Enter (first result) → Escape → click the message box (bottom-centre of the window rect) → paste the message → Enter. Non-Store builds with a known phone number (`whatsapp_contacts.json`) use the deep link with pre-filled text. `MERLIN_WHATSAPP_METHOD=search|deeplink` forces a method; `MERLIN_WHATSAPP_AUTOSEND=0` leaves the text typed without sending.
 - **Caveat:** if the contact has no chat in the list, the paste would land in the previously open chat; the flow assumes the contact exists.
+
+### `call_whatsapp_contact`
+- **Description:** Starts a WhatsApp voice or video call to a contact (e.g. "llama a mamá", "hazle una videollamada a Liz", "call mom"). Asks for a spoken yes/no before calling (irreversible/interruptive).
+- **Input Schema:** `contact: str`, `video: bool = False`
+- **Implementation:** Opens the chat via the in-app search flow, then clicks the call button in the chat header. Button positions are offsets from the window's top-right corner, scaled by the window's DPI. **Calibration:** call with `dry=True` - the cursor moves onto the button without clicking (verify visually); then override the offsets with `MERLIN_WA_CALL_RIGHT`, `MERLIN_WA_CALL_VIDEO_RIGHT`, `MERLIN_WA_CALL_TOP` if needed.
+- **Note:** Windows may prompt for microphone permission on the first call.
 - **Safety Policy:** Sending is allowed on voice command (near-total control model); message text is read back for confirmation when time permits.
 
 ---
@@ -91,7 +97,8 @@
 
 ### `transcribe_audio_stt`
 - **Description:** Converts recorded speech to text. **Bilingual**: automatic Spanish/English detection (validated by TTS->STT round trip).
-- **Implementation:** `faster-whisper` (model `small`, CPU int8, `language=None` auto-detect; requires `av==13.1.0` pinned - PyAV >= 14 breaks decode_audio).
+- **Implementation:** `faster-whisper` (model `medium` CPU int8 - fits the RAM budget since the e2b model freed ~3 GB - with `language=None` auto-detect, temperature 0, beam 5, VAD, hallucination filters and `initial_prompt` name hints; requires `av==13.1.0` pinned - PyAV >= 14 breaks decode_audio).
+- **Endpointing capture (`record_audio`)**: MERLIN no longer records a fixed window - it listens until ~1 s of silence after speech (`silence_end_ms`), with an adaptive noise floor, ~300 ms pre-roll (the first word is never clipped), a hard cap of `record_max_seconds` (20 s) and click rejection (a single loud burst is not speech). Verified by unit tests on the state machine plus a real mic stream check.
 
 ### `synthesize_speech_tts`
 - **Description:** Converts model response text into natural audio output. **Bilingual voices**: `es_ES-sharvard-medium` (Spanish) and `en_GB-alan-medium` (British English, per user requirement).
