@@ -338,6 +338,53 @@ def download_file(url: str, destination_folder: str = "Downloads") -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+# ------------------------------------------------------------------ Screenshots
+def take_screenshot(target: str = "screen") -> dict:
+    """Capture the full screen (or a window by partial title) to
+    ~/merlin/screenshots/. `target`: "screen"/"pantalla" or a window name
+    (e.g. "opencode", "chrome")."""
+    try:
+        import pyautogui
+        from datetime import datetime
+
+        region = None
+        if target and target.strip().lower() not in ("screen", "pantalla",
+                                                      "full", "ventana"):
+            hwnd = None
+            try:
+                import win32gui
+                from merlin.tools import writing_tools
+                needle = target.strip().lower()
+                for h, title in writing_tools._windows():
+                    if needle in title.lower() and not title.lower().startswith("merlin"):
+                        hwnd = h
+                        break
+                if hwnd is None:
+                    return {"ok": False,
+                            "error": f"No open window matches '{target}'."}
+                import win32con
+                if win32gui.IsIconic(hwnd):  # minimized: the rect is useless
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    time.sleep(0.8)
+                region = win32gui.GetWindowRect(hwnd)  # (left, top, right, bottom)
+            except ImportError:
+                region = None  # window capture is Windows-only; full screen instead
+        img = pyautogui.screenshot(region=(region[0], region[1],
+                                            region[2] - region[0],
+                                            region[3] - region[1])
+                                    if region else None)
+        out_dir = Path.home() / "merlin" / "screenshots"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"merlin_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        img.save(str(path))
+        return {"ok": True, "path": str(path),
+                "target": target or "screen",
+                "size": f"{img.width}x{img.height}"}
+    except Exception as exc:
+        logger.exception("take_screenshot failed")
+        return {"ok": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------- Media
 def _itunes_running() -> bool:
     try:

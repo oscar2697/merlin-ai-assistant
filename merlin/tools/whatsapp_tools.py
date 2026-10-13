@@ -166,10 +166,14 @@ def _click_message_box() -> dict:
     left, _top, right, bottom = win32gui.GetWindowRect(hwnd)
     x = left + (right - left) // 2
     y = bottom - 70  # inside the input row (not the bottom edge)
-    pyautogui.click((x, y))
-    time.sleep(0.3)
-    pyautogui.click((x, y))  # second click: make sure the input has focus
-    time.sleep(0.4)
+    from merlin.gui import cursor_overlay
+    cursor_overlay.announce_wait(x, y)          # MERLIN's visible cursor moves
+    with cursor_overlay.agent_mode():
+        pyautogui.click((x, y))
+        time.sleep(0.3)
+        cursor_overlay.announce_click(x, y)
+        pyautogui.click((x, y))  # second click: make sure the input has focus
+        time.sleep(0.4)
     return {"ok": True}
 
 
@@ -290,12 +294,94 @@ def _hover_click(x: int, y: int) -> None:
     with a short hold. WinUI buttons often ignore the instant move+click that
     pyautogui.click() performs."""
     import pyautogui
-    pyautogui.moveTo(x - 6, y, duration=0.15)  # approach: generates pointer-move events
-    pyautogui.moveTo(x, y, duration=0.25)
-    time.sleep(0.35)                           # let the button show its hover state
-    pyautogui.mouseDown()
-    time.sleep(0.12)
-    pyautogui.mouseUp()
+    from merlin.gui import cursor_overlay
+    cursor_overlay.announce_wait(x, y)          # MERLIN's visible cursor moves
+    with cursor_overlay.agent_mode():           # MERLIN operates the pointer
+        pyautogui.moveTo(x - 6, y, duration=0.15)  # approach: pointer-move events
+        pyautogui.moveTo(x, y, duration=0.25)
+        time.sleep(0.35)                           # let the button show its hover state
+        cursor_overlay.announce_click(x, y)        # click ripple, then the real one
+        pyautogui.mouseDown()
+        time.sleep(0.12)
+        pyautogui.mouseUp()
+
+
+def _clipboard_set_file(path: str) -> bool:
+    """Put a FILE on the clipboard (CF_HDROP) so Ctrl+V pastes it as media."""
+    try:
+        import struct
+
+        import win32clipboard
+        import win32con
+        # DROPFILES header: pFiles=20 (offset to the list), pt(0,0), fNC=0,
+        # fWide=1 (UTF-16 path), then a double-null-terminated wide path.
+        header = struct.pack("IIIIi", 20, 0, 0, 0, 1)
+        payload = header + (str(path) + "\0").encode("utf-16-le") + b"\0"
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_HDROP, payload)
+        finally:
+            win32clipboard.CloseClipboard()
+        return True
+    except Exception:
+        logger.exception("clipboard file copy failed")
+        return False
+
+
+def _latest_screenshot() -> str | None:
+    """Newest image in ~/merlin/screenshots, if any."""
+    d = Path.home() / "merlin" / "screenshots"
+    if not d.exists():
+        return None
+    files = sorted(d.glob("merlin_*.png"))
+    return str(files[-1]) if files else None
+
+
+def send_whatsapp_media(contact: str, image_path: str = "last") -> dict:
+    """Send the latest screenshot (or a given file) to a contact's chat:
+    open the chat, paste the file from the clipboard, Enter to send."""
+    contact = (contact or "").strip()
+    if not contact:
+        return {"ok": False, "error": "Hace falta un contacto."}
+    if sys.platform != "win32":
+        return {"ok": False, "error": "WhatsApp media is Windows-only for now."}
+    path = image_path
+    if not path or str(path).strip().lower() in ("last", "última", "ultima",
+                                                 "latest", "captura", "screenshot"):
+        path = _latest_screenshot()
+    if not path or not Path(path).exists():
+        return {"ok": False,
+                "error": "No tengo ninguna captura reciente. Pídeme que tome "
+                         "una primero."}
+    try:
+        import pyautogui
+    except ImportError:
+        return {"ok": False, "error": "pyautogui not installed."}
+
+    found = resolve_contact(contact)
+    search_name = found["name"] if found else contact
+    try:
+        res = _open_chat(search_name)
+        if not res.get("ok"):
+            return res
+        res = _click_message_box()
+        if not res.get("ok"):
+            return res
+        if not _clipboard_set_file(path):
+            return {"ok": False, "error": "No pude copiar el archivo al portapapeles."}
+        time.sleep(0.4)
+        pyautogui.hotkey("ctrl", "v")     # paste the image into the chat
+        time.sleep(2.5)                   # let WhatsApp render the preview
+        sent = _autosend()
+        if sent:
+            pyautogui.press("enter")     # send
+            time.sleep(1.0)
+        return {"ok": True, "contact": contact, "image": str(path),
+                "method": "clipboard paste", "sent": sent}
+    except Exception as exc:
+        logger.exception("send_whatsapp_media failed")
+        return {"ok": False, "error": str(exc)}
 
 
 def call_whatsapp_contact(contact: str, video: bool = False,

@@ -355,6 +355,16 @@ def transcribe_audio_stt(audio_path: str) -> dict:
         audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
 
         forced = os.environ.get("MERLIN_STT_LANGUAGE", "auto").strip().lower()
+        if forced in ("es", "en"):
+            language = forced
+        else:
+            # Primera pasada: deja a Whisper decidir entre es/en
+            text, info = _run_whisper(model, audio, None)
+            if getattr(info, "language", None) not in ("es", "en") \
+                    or getattr(info, "language_probability", 1.0) < 0.5:
+                # Whisper no está seguro o detectó otro idioma -> reintenta en español
+                text, info = _run_whisper(model, audio, "es")
+            language = getattr(info, "language", None)
         language = None if forced in ("", "auto") else forced
         text, info = _run_whisper(model, audio, language)
         if language is None and info.language not in _ALLOWED_LANGS:

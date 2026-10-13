@@ -23,7 +23,8 @@ from merlin.events import post_event
 from merlin.langdetect import detect_language
 from merlin.llm import get_llm
 from merlin.state import GraphState, append_to
-from merlin.tools import system_tools, whatsapp_tools, writing_tools
+from merlin.tools import (linkedin_tools, system_tools, whatsapp_tools,
+                          writing_tools)
 
 logger = logging.getLogger("merlin.agents.os_agent")
 
@@ -68,15 +69,22 @@ _OS_TOOLS = {
     "interact_gui_app": system_tools.interact_gui_app,
     "manage_files": system_tools.manage_files,
     "download_file": system_tools.download_file,
+    "take_screenshot": system_tools.take_screenshot,
     "control_media_player": system_tools.control_media_player,
     "send_whatsapp_message": whatsapp_tools.send_whatsapp_message,
+    "send_whatsapp_media": whatsapp_tools.send_whatsapp_media,
     "call_whatsapp_contact": whatsapp_tools.call_whatsapp_contact,
+    "post_linkedin": linkedin_tools.post_linkedin,
     "search_web": system_tools.search_web,
     "write_text": _write_text,
 }
 
 # Tools that need a spoken yes/no before running (irreversible/interruptive).
-_CONFIRM_TOOLS = {"send_whatsapp_message", "call_whatsapp_contact"}
+_CONFIRM_TOOLS = {"send_whatsapp_message", "send_whatsapp_media",
+                  "call_whatsapp_contact"}
+
+# Tools that stage work on screen and confirm AFTER (draft visible to review).
+_STAGE_CONFIRM_TOOLS = {"post_linkedin"}
 
 # Only these tools need the LLM to explain a successful result (their output is
 # free-form). Everything else is answered with a local one-liner.
@@ -176,9 +184,12 @@ _PLANNER_PROMPT = (
     '- interact_gui_app: {{"tool": "interact_gui_app", "app_name": str, "action": "focus"|"type"|"hotkey", "payload": str}}\n'
     '- manage_files: {{"tool": "manage_files", "action": "list"|"move"|"copy"|"rename"|"delete", "source": str, "destination": str}}\n'
     '- download_file: {{"tool": "download_file", "url": str, "destination_folder": str}}\n'
+    '- take_screenshot: {{"tool": "take_screenshot", "target": str ("screen" or a window name e.g. "chrome")}}\n'
     '- control_media_player: {{"tool": "control_media_player", "action": "play"|"pause"|"next"|"previous"|"play_track"|"add_to_library", "media_path": str, "shuffle": bool, "track_name": str (song/artist/album for play_track), "search_field": "all"|"song"|"artist"|"album"}}\n'
     '- send_whatsapp_message: {{"tool": "send_whatsapp_message", "contact": str, "message": str}}\n'
+    '- send_whatsapp_media: {{"tool": "send_whatsapp_media", "contact": str, "image_path": str ("last" = latest screenshot)}}\n'
     '- call_whatsapp_contact: {{"tool": "call_whatsapp_contact", "contact": str, "video": bool (true = video call, false = voice call)}}\n'
+    '- post_linkedin: {{"tool": "post_linkedin", "instruction": str (what the post is about), "image_path": str (image to attach, "last" = latest screenshot)}}\n'
     '- search_web: {{"tool": "search_web", "query": str}}\n'
     '- write_text: {{"tool": "write_text", "app_name": str (window to write in, e.g. "Word"; "" = the window the user was in), "instruction": str (what to write, e.g. "a paragraph about computer networks"), "text": str (exact text, optional)}}\n'
     'If nothing fits, return {{"tool": "none"}}.\n\n'
@@ -210,7 +221,7 @@ def _normalize_plan(plan: dict) -> dict:
 
 
 def _plan_with_llm(query: str) -> dict | None:
-    answer = get_llm().chat(
+    answer = get_llm("fast").chat(          
         [{"role": "user", "content": _PLANNER_PROMPT.format(query=query)}],
         fallback="",
     )
@@ -320,14 +331,113 @@ def _play_specific_plan(q: str) -> dict | None:
             "track_name": name, "search_field": field}
 
 
+def _linkedin_plan(q: str) -> dict | None:
+    """'publica en linkedin...' / 'post ... on linkedin' -> post_linkedin."""
+    if not re.search(r"\blinkedin\b", q, re.IGNORECASE):
+        return None
+    rest = re.sub(r"\blinkedin\b", " ", q, flags=re.IGNORECASE)
+    rest = re.sub(r"^\s*(?:publica\w*|postea\w*|post|comparte\w*|pon|haz)\s+", "",
+                  rest.strip(), flags=re.IGNORECASE)
+    rest = re.sub(r"^(?:una?\s+)?(?:publicaci[oó]n|publicación|post)?\s*", "",
+                  rest.strip(), flags=re.IGNORECASE)
+    rest = re.sub(r"^(?:en|on|in)\s+", "", rest.strip(), flags=re.IGNORECASE)
+    rest = re.sub(r"^(?:con|about|sobre)\s+", "", rest.strip(), flags=re.IGNORECASE)
+    instruction = rest.strip(" ,.:;")
+    if instruction.lower() in ("", "en", "in", "on", "esto", "it"):
+        instruction = "comparte el avance de mi proyecto"
+    plan = {"tool": "post_linkedin", "instruction": instruction}
+    if re.search(r"\b(?:captura|screenshot|imagen|foto)\b", q, re.IGNORECASE):
+        plan["image_path"] = "last"
+    return plan
+
+
+# "envía la captura a mamá (por whatsapp)" -> send the LATEST screenshot
+_WA_MEDIA_RE = re.compile(
+    r"\b(?:env[ií]a\w*|manda\w*|comparte\w*|send|share)\s+"
+    r"(?:la\s+|el\s+|un[a]?\s+|this\s+)?"
+    r"(?P<what>captura(?:\s+de\s+pantalla)?|screenshot|pantallazo|imagen|foto|image|screenshot)"
+    r"\s+(?:a|para|al|to)\s+(?P<contact>.+?)"
+    r"(?:\s+(?:por|de|en|via|on)\s+whatsapp)?\s*$",
+    re.IGNORECASE)
+
+
+def _whatsapp_media_plan(query: str) -> dict | None:
+    m = _WA_MEDIA_RE.search(query.strip(" ?.,!¿¡"))
+    if not m:
+        return None
+    contact = re.sub(r"^(?:mi|mis|el|la|my)\s+", "",
+                     m.group("contact").strip(" ,.:;\"'"),
+                     flags=re.IGNORECASE).strip()
+    if not contact:
+        return None
+    return {"tool": "send_whatsapp_media", "contact": contact,
+            "image_path": "last"}
+
+
+# "envía (la captura) a <contacto> (por whatsapp)" WITHOUT repeating the media
+# noun: only meaningful right after a screenshot step ("toma una captura y
+# envíala a dome"); on its own it would be ambiguous with a text message.
+_WA_SEND_TO_RE = re.compile(
+    r"\b(?:env[ií]a\w*|m[aá]nd\w*|comparte\w*|pasa\w*|send|share)\s+"
+    r"(?:la\s+|el\s+|un[a]?\s+|this\s+|eso\s+)?"
+    r"(?:captura(?:\s+de\s+pantalla)?|screenshot|pantallazo|imagen|foto|image)?"
+    r"\s*(?:a|para|al|to)\s+(?P<contact>.+?)"
+    r"(?:\s+(?:por|de|en|via|on)\s+whatsapp)?\s*$",
+    re.IGNORECASE)
+
+
+def _followup_media_plan(clause: str, prev_plans: list) -> dict | None:
+    """'...y envíala a dome' after a screenshot step -> send THAT screenshot."""
+    if not prev_plans or prev_plans[-1].get("tool") != "take_screenshot":
+        return None
+    m = _WA_SEND_TO_RE.search(clause.strip(" ?.,!¿¡"))
+    if not m:
+        return None
+    contact = re.sub(r"^(?:mi|mis|el|la|my)\s+", "",
+                     m.group("contact").strip(" ,.:;\"'"),
+                     flags=re.IGNORECASE).strip()
+    if not contact:
+        return None
+    return {"tool": "send_whatsapp_media", "contact": contact,
+            "image_path": "last"}
+
+
+def _screenshot_plan(q: str) -> dict | None:
+    """'toma una captura (de pantalla)' -> take_screenshot.
+
+    Requires a capture VERB: 'envía la captura a mamá' is sending media,
+    not taking a new screenshot."""
+    takes = re.search(
+        r"\b(?:toma\w*|tomar|haz|hacer|realiza|captura(?:r)?)\s+"
+        r"(?:una?\s+|el\s+|la\s+)?(?:captura|screenshot|pantallazo|pantalla)\b",
+        q, re.IGNORECASE)
+    if not takes and not re.search(r"\bscreenshots?\b", q, re.IGNORECASE):
+        return None
+    target = "screen"
+    m = re.search(r"\b(?:de|del|de la|de el)\s+(?:la\s+)?(?:ventana|window)\s+(.+?)\s*$",
+                  q, re.IGNORECASE)
+    if m and m.group(1).strip():
+        target = m.group(1).strip(" ?.,!¿¡")
+    return {"tool": "take_screenshot", "target": target}
+
+
 def _plan_with_keywords(query: str) -> dict:
     q = query.lower()
     wa = _whatsapp_plan(query)
     if wa:
         return wa
+    media = _whatsapp_media_plan(query)
+    if media:
+        return media
     call = _call_plan(query)
     if call:
         return call
+    shot = _screenshot_plan(q)
+    if shot:
+        return shot
+    linkedin = _linkedin_plan(q)
+    if linkedin:
+        return linkedin
     url = re.search(r"https?://\S+", query)
     if url and ("download" in q or "descarga" in q):
         return {"tool": "download_file", "url": url.group(0),
@@ -374,7 +484,8 @@ def _fast_clause_plan(clause: str) -> dict | None:
     if tool == "open_app" and len(plan.get("app_name", "").split()) <= 3:
         return plan
     if tool in ("control_system_resource", "search_web", "write_text",
-                "send_whatsapp_message", "call_whatsapp_contact"):
+                "send_whatsapp_message", "send_whatsapp_media",
+                "call_whatsapp_contact", "take_screenshot", "post_linkedin"):
         return plan
     if tool == "control_media_player" and plan.get("action") != "add_to_library" \
             and (words <= 7 or (plan.get("action") == "play_track" and words <= 12)):
@@ -392,6 +503,9 @@ def _fast_steps(query: str) -> list | None:
     call = _call_plan(query)  # "llama a mamá y dile que..." stays one plan
     if call:
         return [call]
+    linkedin = _linkedin_plan(q)  # the post instruction may contain "y"/"and"
+    if linkedin and not _STEP_SPLIT.search(q):
+        return [linkedin]  # "y"-chains fall through and split: capture + post
     if not re.search(r"\b(?:abre|abrir|open|launch)\b", q):
         writing = _write_plan(query)  # the text to write may contain "y"/"and"
         if writing:
@@ -405,6 +519,8 @@ def _fast_steps(query: str) -> list | None:
     plans = []
     for clause in clauses:
         plan = _fast_clause_plan(clause)
+        if plan is None:
+            plan = _followup_media_plan(clause, plans)
         if plan is None:
             return None
         plans.append(plan)
@@ -422,6 +538,21 @@ def _confirm_send_enabled() -> bool:
     return os.environ.get("MERLIN_CONFIRM_SEND", "1") != "0"
 
 
+def _ask_staged_confirmation(plan: dict, result: dict, language: str) -> str | None:
+    """Staged actions (e.g. the LinkedIn draft on screen): ask to finalise."""
+    es = str(language).lower().startswith("es")
+    confirm.set_pending({"plan": {**plan, "publish": True}, "language": language})
+    if plan.get("tool") == "post_linkedin":
+        draft = (result.get("draft") or "").strip()
+        short = draft if len(draft) <= 220 else draft[:217] + "..."
+        if es:
+            return (f"Preparé este post de LinkedIn, lo tienes en pantalla: "
+                    f"\"{short}\". ¿Lo publico? Dime sí o no.")
+        return (f"I staged this LinkedIn post, it's on screen: \"{short}\". "
+                f"Shall I publish it? Say yes or no.")
+    return None
+
+
 def _ask_action_confirmation(plan: dict, language: str) -> str | None:
     """Store the action as pending and return the spoken question.
     Returns None when the tool should just run (it explains a missing contact).
@@ -437,6 +568,12 @@ def _ask_action_confirmation(plan: dict, language: str) -> str | None:
     if found is None and not whatsapp_tools.search_enabled():
         return None  # the tool itself explains that the number is missing
     confirm.set_pending({"plan": plan, "language": language})
+    if plan.get("tool") == "send_whatsapp_media":
+        if es:
+            return (f"Voy a enviar a {contact} la última captura por WhatsApp. "
+                    f"¿La envío? Dime sí o no.")
+        return (f"I'm about to send {contact} the latest screenshot on "
+                f"WhatsApp. Shall I send it? Say yes or no.")
     if plan.get("tool") == "call_whatsapp_contact":
         kind = "videollamada" if plan.get("video") else "llamada"
         if es:
@@ -511,17 +648,24 @@ def os_agent_node(state: GraphState) -> dict:
             "Try naming the app, resource or command explicitly.")
         return updates
 
-    if (not confirmed and len(steps) == 1 and _confirm_send_enabled()
-            and steps[0].get("tool") in _CONFIRM_TOOLS):
-        ask = _ask_action_confirmation(steps[0], language)
-        if ask:
-            updates["final_response"] = ask
-            return updates
-
     calls, results, summaries = [], [], []
+    pending_ask = None
     for i, plan in enumerate(steps):
         if i and calls[-1]["tool"] == "open_app" and results[-1].get("ok"):
             time.sleep(_APP_LAUNCH_WAIT)  # let the app finish opening
+        # "toma una captura y publícala/envíala": attach the fresh screenshot
+        if (i and calls[-1]["tool"] == "take_screenshot"
+                and plan.get("tool") in ("post_linkedin", "send_whatsapp_media")
+                and not plan.get("image_path")):
+            plan["image_path"] = "last"
+        # Irreversible step (message / media / call): confirm BEFORE running it.
+        # Earlier steps in the chain (e.g. the screenshot) already ran, so the
+        # confirmation references fresh data.
+        if (not confirmed and _confirm_send_enabled()
+                and plan.get("tool") in _CONFIRM_TOOLS):
+            pending_ask = _ask_action_confirmation(plan, language)
+            if pending_ask:
+                break  # ask the user, and stop here
         tool_name, args, result = _run_step(plan)
         logger.info("OS step: %s %s -> %s", tool_name, args,
                     {k: v for k, v in result.items()
@@ -535,6 +679,19 @@ def os_agent_node(state: GraphState) -> dict:
 
     updates["tool_calls"] = list(state.get("tool_calls") or []) + calls
     updates["tool_results"] = list(state.get("tool_results") or []) + results
+
+    if pending_ask:
+        updates["final_response"] = " ".join(summaries + [pending_ask]).strip()
+        return updates
+
+    # Staged tools (LinkedIn): the draft is ON SCREEN -> ask sí/no to publish.
+    last_tool, last_result = calls[-1]["tool"], results[-1]
+    if (not confirmed and last_result.get("needs_confirmation")
+            and last_tool in _STAGE_CONFIRM_TOOLS):
+        ask = _ask_staged_confirmation(steps[-1], last_result, language)
+        if ask:
+            updates["final_response"] = ask
+            return updates
 
     summary = " ".join(summaries)
     last_tool, last_result = calls[-1]["tool"], results[-1]
@@ -610,6 +767,16 @@ def _summarize(tool: str, result: dict, language: str) -> str:
         if action == "play" and result.get("shuffle"):
             return "Reproduciendo en modo aleatorio." if es else "Playing on shuffle."
         return f"Listo: {action}." if es else f"Done: {action}."
+    if tool == "send_whatsapp_media":
+        who = result.get("contact")
+        sent = result.get("sent", True)
+        if result.get("ok"):
+            if es:
+                return (f"Captura enviada a {who}." if sent else
+                        f"Dejé la captura lista para {who}; solo falta enviarla.")
+            return (f"Screenshot sent to {who}." if sent else
+                    f"I left the screenshot ready for {who}; it is ready to send.")
+        return f"No pude enviar la captura: {result.get('error', 'error')}"
     if tool == "send_whatsapp_message":
         who = result.get("contact")
         sent = result.get("sent", True)
@@ -634,6 +801,25 @@ def _summarize(tool: str, result: dict, language: str) -> str:
         if es:
             return f"No pude iniciar la {kind} a {who}: {result.get('error', 'error')}"
         return f"Could not start the call to {who}: {result.get('error', 'error')}"
+    if tool == "post_linkedin":
+        if result.get("published"):
+            return ("¡Publicado en LinkedIn!" if es else "Published on LinkedIn!")
+        if result.get("staged"):
+            return ("Tengo el post de LinkedIn listo en pantalla." if es
+                    else "The LinkedIn post is staged on screen.")
+        if result.get("need_login"):
+            return ("Abre la ventana del navegador e inicia sesión en LinkedIn "
+                    "(solo esta vez)." if es else
+                    "Log in to LinkedIn in the opened browser window (one time only).")
+        err = result.get("error", "")
+        return f"No pude preparar el post de LinkedIn: {err}" if es else \
+            f"Could not prepare the LinkedIn post: {err}"
+    if tool == "take_screenshot":
+        where = ("" if result.get("target") in ("screen", "pantalla", "full")
+                 else f" de {result.get('target')}")
+        return (f"Captura{where} guardada en {result.get('path')}." if es else
+                f"Screenshot{where and ' of ' + result.get('target', '')} saved to "
+                f"{result.get('path')}.")
     if tool == "download_file":
         return (f"Downloaded to {result.get('path')} "
                 f"({result.get('size_mb')} MB).")

@@ -33,6 +33,17 @@
 - **Implementation:** `pathlib` / `shutil` + `send2trash`.
 - **Safety Policy:** Permanent deletion (bypassing trash) is blacklisted.
 
+### `take_screenshot`
+- **Description:** Captures the full screen or a specific window ("toma una captura de la ventana Chrome") to `~/merlin/screenshots/`, restoring minimized windows first. Used by the LinkedIn demo flow and available to any agent.
+- **Input Schema:** `target: str = "screen"` ("screen" | partial window title)
+- **Implementation:** `pyautogui.screenshot` (Pillow) + `win32gui` window rects.
+
+### `post_linkedin`
+- **Description:** Stages (and after a spoken yes, publishes) a LinkedIn post with optional image — the demo-video flow: "toma una captura del proceso y publícala en LinkedIn".
+- **Input Schema:** `instruction: str` (what the post is about), `image_path: str = ""` ("last" = newest screenshot), `publish: bool = False` (set by the confirmation flow)
+- **Implementation:** Playwright with a **persistent Chrome profile** (`~/merlin/browser_profiles/linkedin`; first run shows the login page once). Draft composed with the fast LLM (human tone, short). Two-phase: stage fills the on-screen composer → MERLIN reads the draft and asks sí/no → "sí" clicks Publicar.
+- **Safety:** Human-in-the-loop always. ⚠️ LinkedIn detects automation: use sparingly or the account may be restricted.
+
 ### `download_file`
 - **Description:** Downloads a file from a URL to a user-chosen folder (e.g. a song from a page), reports progress and final path.
 - **Input Schema:** `url: str`, `destination_folder: str = "Downloads"`

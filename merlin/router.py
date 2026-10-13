@@ -34,7 +34,7 @@ KEYWORD_MAP = {
         "volume", "process", "apaga", "enciende", "reprodu", "canción",
         "cancion", "artista", "artist", "song", "playlist", "play",
         "pause", "pausa", "llama", "llamar", "llám", "llamada",
-        "videollamada", "marc", "call",
+        "videollamada", "marc", "call", "linkedin", "captura", "screenshot",
     ),
     ROUTE_WEB: (
         "arxiv", "paper", "artículo", "articulo", "search", "buscar",
