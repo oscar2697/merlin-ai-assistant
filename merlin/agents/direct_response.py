@@ -1,4 +1,4 @@
-"""Direct_Response_Node: general conversation with Gemma via LM Studio."""
+"""Direct_Response_Node: general conversation with Gemma (fast profile)."""
 from __future__ import annotations
 
 import logging
@@ -7,7 +7,8 @@ from merlin.events import post_event
 from merlin.langdetect import detect_language
 from merlin.llm import get_llm
 from merlin.state import GraphState
-from merlin.tools.voice_tools import get_speech_queue, set_current_language, split_sentences
+from merlin.tools.voice_tools import (get_speech_queue, set_current_language,
+                                       split_sentences)
 
 logger = logging.getLogger("merlin.agents.direct_response")
 
@@ -26,9 +27,9 @@ def direct_response_node(state: GraphState) -> dict:
         messages.append({"role": role, "content": msg.get("content", "")})
     messages.append({"role": "user", "content": query})
 
-    fallback = ("I'm running offline right now (LM Studio unreachable), but I "
-                f"heard you: \"{query}\". Please start the LM Studio server to "
-                "enable full conversation.")
+    fallback = ("I'm running offline right now (no local model reachable), but I "
+                f"heard you: \"{query}\". Please start Ollama to enable full "
+                "conversation.")
 
     # Voice input: speak each sentence as it finishes generating (streaming TTS)
     spoken = {"chars": 0}
@@ -46,8 +47,8 @@ def direct_response_node(state: GraphState) -> dict:
         def on_token(partial: str) -> None:
             post_event("merlin_partial", partial)
 
-    post_event("status", "thinking... (Gemma reasoning)")
-    updates["final_response"] = get_llm().chat(
+    post_event("status", "thinking")
+    updates["final_response"] = get_llm("fast").chat(     # ← ANTES: get_llm()
         messages, fallback=fallback, on_token=on_token).strip()
     return updates
 

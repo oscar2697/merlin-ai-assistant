@@ -1,10 +1,11 @@
-"""Connector to LM Studio's OpenAI-compatible API with graceful offline fallback."""
+"""Ollama API client optimizado basado en pruebas de parámetros."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
-from typing import List, Optional
+from typing import List, Dict, Optional
 
 import httpx
 
@@ -14,155 +15,189 @@ logger = logging.getLogger("merlin.llm")
 
 
 class LLMConnector:
-    """Talks to LM Studio (OpenAI-compatible). Degrades gracefully when offline."""
+    """Talks to Ollama with optimized parameters."""
 
-    def __init__(self, config: Optional[MerlinConfig] = None,
-                 model_name: Optional[str] = None) -> None:
+    def __init__(self, config: Optional[MerlinConfig] = None, 
+                 model_name: Optional[str] = None, think: bool = True) -> None:
         self.config = config or get_config()
         self.model_name = model_name or self.config.model_name
-        self._chat_model = None
-        self._detected_model: Optional[str] = None
+        self.think = think
         self.available: Optional[bool] = None
-
-    def _headers(self) -> dict:
-        if self.config.lm_studio_api_key:
-            return {"Authorization": f"Bearer {self.config.lm_studio_api_key}"}
-        return {}
-
-    def detect_model(self) -> Optional[str]:
-        """Auto-detect the served model id via GET /v1/models."""
-        url = self.config.lm_studio_base_url.rstrip("/") + "/models"
-        try:
-            resp = httpx.get(url, headers=self._headers(), timeout=5)
-            if resp.status_code == 200:
-                data = resp.json().get("data", [])
-                ids = [m.get("id", "") for m in data]
-                for mid in ids:
-                    if self.model_name.lower() in mid.lower():
-                        self._detected_model = mid
-                        return mid
-                if ids:
-                    self._detected_model = ids[0]
-                    return ids[0]
-            else:
-                logger.warning("LM Studio returned HTTP %s (check API key in .env)",
-                                resp.status_code)
-        except Exception as exc:  # network down, timeout...
-            logger.warning("LM Studio unreachable at %s: %s", url, exc)
-        return None
+        self._detected_model: Optional[str] = None
+        
+        # FIX: normaliza la URL - quita /v1 si viene del .env heredado de LM Studio
+        base = self.config.lm_studio_base_url.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        self._base = base
 
     def health_check(self) -> bool:
-        model = self.detect_model()
-        self.available = model is not None
-        if model:
-            logger.info("LM Studio OK - serving model: %s", model)
-        else:
-            logger.warning("LM Studio NOT available - MERLIN runs in degraded mode")
-        return self.available
-
-    def _get_chat_model(self):
-        if self._chat_model is None:
-            from langchain_openai import ChatOpenAI  # deferred import
-
-            kwargs = {}
-            # Optional: LLM_REASONING_EFFORT=low|medium|high. Only models whose
-            # chat template supports it will honour it; otherwise use the
-            # "thinking" toggle in LM Studio's model settings.
-            effort = os.environ.get("LLM_REASONING_EFFORT")
-            if effort:
-                kwargs["extra_body"] = {"reasoning_effort": effort}
-
-            self._chat_model = ChatOpenAI(
-                model=self._detected_model or self.model_name,
-                temperature=self.config.temperature,
-                base_url=self.config.lm_studio_base_url,
-                api_key=self.config.lm_studio_api_key or "lm-studio",
-                timeout=self.config.llm_timeout_seconds,
-                max_tokens=self.config.llm_max_tokens,
-                **kwargs,
-            )
-        return self._chat_model
-
-    def chat(self, messages: List[dict], fallback: str = "",
-             on_token=None) -> str:
-        """Invoke the LLM. Returns `fallback` (and logs) when the server is down.
-
-        `on_token(accumulated_text)` is called during streaming so the GUI can
-        render the answer token by token (perceived latency drops a lot).
-        """
-        if self._detected_model is None and not self.health_check():
-            logger.warning("LLM offline - using fallback response")
-            return fallback
+        """Verifica si Ollama está disponible y detecta el modelo configurado."""
         try:
-            if on_token is not None:
-                return self._chat_streaming(messages, fallback, on_token)
-            started = time.perf_counter()
-            response = self._get_chat_model().invoke(messages)
-            elapsed = time.perf_counter() - started
-            self.available = True
+            resp = httpx.get(f"{self._base}/api/tags", timeout=5)
+            if resp.status_code != 200:
+                logger.warning("Ollama respondió HTTP %d", resp.status_code)
+                self.available = False
+                return False
+            
+            data = resp.json()
+            available_models = [m.get("name", "") for m in data.get("models", [])]
+            
+            # 1. Buscar el modelo exacto que pedimos en el config
+            target = self.model_name
+            for name in available_models:
+                if target == name or target in name or name.startswith(target + ":"):
+                    self._detected_model = name
+                    self.available = True
+                    logger.info("Ollama OK - serving: %s (configurado: %s)",
+                            self._detected_model, target)
+                    return True
+            
+            # 2. Si el perfil es "fast" y apunta al mismo modelo que "main",
+            #    reutilizar el que ya está cargado
+            for name in available_models:
+                if name.startswith("gemma4:") or name.startswith("qwen3:"):
+                    logger.warning("Modelo %s no encontrado; usando %s como fallback",
+                                target, name)
+                    self._detected_model = name
+                    self.available = True
+                    return True
+            
+            # 3. Ningún modelo disponible
+            logger.warning("Modelo '%s' no está en Ollama. Disponibles: %s",
+                        target, available_models)
+            logger.info("Descárgalo con: ollama pull %s", target)
+            self.available = False
+            return False
+            
+        except Exception as e:
+            logger.warning("Ollama unreachable: %s", e)
+            self.available = False
+            return False
 
-            usage = getattr(response, "usage_metadata", None) or {}
-            out_tokens = usage.get("output_tokens", 0)
-            logger.info("LLM call: %.1fs, %d output tokens (%.1f tok/s)",
-                        elapsed, out_tokens,
-                        out_tokens / elapsed if elapsed else 0.0)
+    def chat(self, messages: List[Dict[str, str]], fallback: str = "",
+             on_token=None) -> str:
+        """Envía mensajes a Ollama con parámetros optimizados."""
+        if self.available is None and not self.health_check():
+            logger.warning("LLM offline - using fallback")
+            return fallback
 
-            content = (getattr(response, "content", "") or "").strip()
-            if content:
-                return content
-            # Thinking models can exhaust the token budget on reasoning;
-            # an empty content is a failure for us -> degrade gracefully.
-            logger.warning("LLM returned empty content (budget spent on reasoning? "
-                           "max_tokens=%s)", self.config.llm_max_tokens)
+        payload = {
+            "model": self._detected_model or self.model_name,
+            "messages": messages,
+            "stream": on_token is not None,
+            "think": self.think,
+            "keep_alive": "5m",
+            "options": {
+                "num_ctx": 8192
+            }
+        }
+
+        try:
+            if on_token:
+                return self._stream_chat(payload, fallback, on_token)
+            else:
+                return self._sync_chat(payload, fallback)
+        except Exception as e:
+            logger.error("LLM error: %s", e)
             self.available = False
             return fallback
-        except Exception as exc:
-            self.available = False
-            logger.warning("LLM invocation failed (%s) - using fallback response", exc)
+
+    def _sync_chat(self, payload: dict, fallback: str) -> str:
+        start_time = time.time()
+        
+        response = httpx.post(
+            f"{self._base}/api/chat",                                  # ← _base
+            json=payload,
+            timeout=self.config.llm_timeout_seconds
+        )
+        
+        if response.status_code != 200:
+            logger.error("LLM HTTP %d: %s", response.status_code, response.text[:200])
             return fallback
+        
+        elapsed = time.time() - start_time
+        data = response.json()
+        content = data.get("message", {}).get("content", "").strip()
+        
+        if not content:
+            logger.warning("LLM returned empty content")
+            return fallback
+        
+        load_ms = data.get("load_duration", 0) / 1_000_000
+        eval_ms = data.get("eval_duration", 0) / 1_000_000
+        tokens = data.get("eval_count", 0)
+        speed = tokens / (eval_ms / 1000) if eval_ms > 0 else 0
+        
+        logger.info(f"LLM call: {elapsed:.1f}s, load: {load_ms:.0f}ms, "
+                   f"gen: {eval_ms/1000:.1f}s, {speed:.1f} tok/s, "
+                   f"tokens: {tokens}")
+        
+        self.available = True
+        return content
 
-    def _chat_streaming(self, messages: List[dict], fallback: str,
-                        on_token) -> str:
-        """Stream tokens; call on_token with the accumulated visible content.
+    def _stream_chat(self, payload: dict, fallback: str, on_token) -> str:
+        start_time = time.time()
+        content_parts = []
+        
+        try:
+            with httpx.stream(
+                "POST",
+                f"{self._base}/api/chat",                              # ← _base
+                json=payload,
+                timeout=self.config.llm_timeout_seconds
+            ) as response:
+                if response.status_code != 200:
+                    logger.error("LLM stream HTTP %d", response.status_code)
+                    return fallback
+                
+                for line in response.iter_lines():
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if "message" in data:
+                                chunk = data["message"].get("content", "")
+                                if chunk:
+                                    content_parts.append(chunk)
+                                    on_token("".join(content_parts))
+                        except json.JSONDecodeError:
+                            continue
+        except Exception as e:
+            logger.error("LLM stream error: %s", e)
+            return fallback
+        
+        elapsed = time.time() - start_time
+        full_content = "".join(content_parts).strip()
+        
+        if not full_content:
+            logger.warning("LLM stream returned empty content")
+            return fallback
+        
+        logger.info(f"LLM stream: {elapsed:.1f}s, {len(content_parts)} chunks, "
+                   f"{len(full_content)} chars")
+        
+        self.available = True
+        return full_content
 
-        Thinking models stream empty `content` chunks while reasoning, so
-        partials appear only when the answer itself starts - the status event
-        keeps the GUI informed during the reasoning phase.
-        """
-        started = time.perf_counter()
-        parts: List[str] = []
-        for chunk in self._get_chat_model().stream(messages):
-            token = getattr(chunk, "content", "") or ""
-            if token:
-                parts.append(token)
-                on_token("".join(parts))
-        elapsed = time.perf_counter() - started
-        content = "".join(parts).strip()
-        if content:
-            self.available = True
-            logger.info("LLM stream: %.1fs, %d chars", elapsed, len(content))
-            return content
-        self.available = False
-        logger.warning("LLM stream returned empty content after %.1fs", elapsed)
-        return fallback
 
-
-_CONNECTORS: dict = {}
+_CONNECTORS: Dict[str, LLMConnector] = {}
 
 
 def get_llm(profile: str = "main") -> LLMConnector:
-    """Model selector: 'main' = reasoning model; 'fast' = short-synthesis model.
-
-    The fast profile (MERLIN_FAST_MODEL in .env) is for tool/web summaries where
-    quality demands are low and latency matters (see AGENTS.md section 4).
-    With no fast model configured both profiles use the main model.
-    """
+    """Retorna una instancia del cliente Ollama (cacheada por perfil)."""
     if profile in _CONNECTORS:
         return _CONNECTORS[profile]
+    
     config = get_config()
+    
     if profile == "fast" and config.fast_model_name:
-        connector = LLMConnector(config, model_name=config.fast_model_name)
+        connector = LLMConnector(config, model_name=config.fast_model_name, think=False)
     else:
-        connector = LLMConnector(config)
+        connector = LLMConnector(config, think=True)
+    
     _CONNECTORS[profile] = connector
     return connector
+
+
+# Alias para compatibilidad
+OllamaClient = LLMConnector

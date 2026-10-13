@@ -35,7 +35,7 @@ class MerlinConfig:
     # was codenamed JARVIS). A custom "Merlin"/"Arthur" model is a pending
     # openwakeword training task.
     wake_words: tuple = ("merlin", "arthur", "jarvis")
-    whisper_model_size: str = "medium"  # "medium" now fits RAM (e2b freed ~3 GB)
+    whisper_model_size: str = os.getenv("MERLIN_WHISPER_SIZE", "small")
     piper_voices: dict = field(
         default_factory=lambda: {
             "es": "es_ES-sharvard-medium",
