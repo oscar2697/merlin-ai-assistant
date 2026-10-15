@@ -89,6 +89,7 @@ class MerlinApp(ctk.CTk):
         self.runtime = runtime
         self.voice_mode = tkinter.BooleanVar(value=False)
         self._stream_bubble = None   # streaming MERLIN bubble (being filled)
+        self._last_cursor_narration_len = 0
         self._last_heard = ""       # last voice transcription (session logic)
         self._wake_stop = threading.Event()
         self._mic_busy = threading.Lock()  # only one microphone user at a time
@@ -306,6 +307,12 @@ class MerlinApp(ctk.CTk):
             return False
 
         text = result["text"]
+        if result.get("needs_confirmation"):
+            # Never run a voice command when Whisper reports low confidence.
+            # Bring the transcript into the editable chat for confirmation.
+            post_event("stt_uncertain", text)
+            return False
+
         self._last_heard = text
         post_event("user_input", text)  # shown as a user bubble
         # speak=True: MERLIN answers out loud (streaming TTS); the turn still
@@ -335,6 +342,18 @@ class MerlinApp(ctk.CTk):
                 self._widget_state(state, detail=event.data)
                 if state == "thinking":
                     self._show_typing()
+            elif event.type == "stt_uncertain":
+                transcript = str(event.data or "").strip()
+                self.deiconify()
+                self.entry.delete(0, "end")
+                self.entry.insert(0, transcript)
+                self.entry.focus_set()
+                self._append("No estoy completamente seguro de haber entendido. "
+                             "Revisa el texto del campo de entrada y pulsa Enviar "
+                             "para confirmarlo, o corrígelo antes.", "info")
+                if self.widget:
+                    self.widget.narrate("No estoy seguro de la instrucción. Revisa el texto y confírmalo.")
+                cursor_overlay.narrate("¿Entendí bien? Revisa la instrucción antes de que la ejecute.", duration=6)
             elif event.type == "error":
                 self._append(f"⚠ {event.data}", "error")
             elif event.type == "info":
@@ -347,6 +366,15 @@ class MerlinApp(ctk.CTk):
             self.widget.set_state(state, detail)
         if self.island:
             self.island.set_state(state, detail)
+        # Keep the desktop cursor and wizard visually in sync with the same
+        # state events instead of letting the cursor appear only on mouse calls.
+        narration = {
+            "listening": "Te escucho…",
+            "thinking": "Estoy pensando…",
+            "speaking": "Estoy respondiendo…",
+        }.get(state)
+        if narration:
+            cursor_overlay.narrate(narration, duration=2.6)
 
     def _show_typing(self) -> None:
         """While the reasoning model thinks: an animated '...' MERLIN bubble."""
@@ -354,14 +382,23 @@ class MerlinApp(ctk.CTk):
             self._stream_bubble = _Bubble(self.chat, "· · ·", who="merlin")
 
     def _render_partial(self, partial: str) -> None:
-        """Token-by-token streaming fills the MERLIN bubble in real time."""
+        """Update chat continuously; update floating speech less often to avoid flicker."""
         if self._stream_bubble is None:
             self._stream_bubble = _Bubble(self.chat, partial, who="merlin")
         else:
             self._stream_bubble.set_text(partial)
+        if self.widget and partial and (len(partial) - self._last_cursor_narration_len >= 38):
+            self.widget.narrate(partial[-85:])
+        if partial and (len(partial) - self._last_cursor_narration_len >= 38
+                        or partial.rstrip().endswith((".", "!", "?", "。"))):
+            cursor_overlay.narrate(partial[-105:], duration=3.8)
+            self._last_cursor_narration_len = len(partial)
 
     def _finalize_stream(self, response: str) -> None:
         """The streamed bubble becomes the final answer bubble."""
+        if response:
+            cursor_overlay.narrate(response[-105:], duration=5.0)
+        self._last_cursor_narration_len = 0
         if self._stream_bubble is not None:
             self._stream_bubble.set_text(response or "…")
             self._stream_bubble = None

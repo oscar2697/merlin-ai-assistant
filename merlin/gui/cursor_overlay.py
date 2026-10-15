@@ -33,6 +33,9 @@ _AMBER = "#e8b64c"
 _HOME = Path.home() / "merlin"
 _SPRITE_SIZE = 46
 _OFFSET = (16, 14)    # sprite top-left relative to the pointer hotspot
+_BUBBLE_BG = "#101b31"
+_BUBBLE_EDGE = "#69d5ff"
+_BUBBLE_FG = "#f2f7ff"
 _LINGER = 1.6         # seconds the chibi stays after the last mouse/keyboard action
 _FRAME_MS = 16        # ~60 fps while visible
 _IDLE_MS = 60         # polling period while hidden
@@ -101,6 +104,19 @@ def announce(x: float, y: float) -> None:
 
 def announce_click(x: float, y: float) -> None:
     announce(x, y)
+
+
+def narrate(text: str, duration: float = 5.0) -> None:
+    """Show a short speech bubble beside MERLIN's cursor avatar.
+
+    Safe to call from worker threads: rendering happens in the Tk polling loop.
+    """
+    if not (_enabled and _overlay is not None) or not text:
+        return
+    try:
+        _overlay.narrate(str(text), duration=duration)
+    except Exception:
+        logger.exception("could not display cursor narration")
 
 
 def announce_wait(x: float, y: float, duration: float = 0.55) -> None:
@@ -217,8 +233,24 @@ class CursorOverlay:
         self._shown = False
         self._styled = False
         self._seen_click = 0.0
+        self._narration_text = ""
+        self._narration_until = 0.0
+        self._bubble_shape_id = self.canvas.create_polygon(
+            0, 0, 0, 0, 0, 0, 0, 0, smooth=True,
+            fill=_BUBBLE_BG, outline=_BUBBLE_EDGE, width=2, state="hidden")
+        self._bubble_text_id = self.canvas.create_text(
+            0, 0, text="", fill=_BUBBLE_FG,
+            font=("Segoe UI", 10), anchor="nw", width=270,
+            state="hidden")
 
         self.root.after(_IDLE_MS, self._poll)
+
+    def narrate(self, text: str, duration: float = 5.0) -> None:
+        """Schedule a wrapped speech bubble near the avatar."""
+        self._narration_text = str(text).strip()
+        self._narration_until = time.monotonic() + max(0.8, float(duration))
+        pulse(max(0.8, float(duration)))
+        # The poll loop updates the canvas; this method may be called by a worker.
 
     # --------------------------------------------------------------- sprite art
     def _load_sprite(self):
@@ -288,7 +320,7 @@ class CursorOverlay:
             now = time.monotonic()
             with _lock:
                 active = _depth > 0
-            wanted = active or now < _active_until or not _pings.empty()
+            wanted = active or now < _active_until or now < self._narration_until or not _pings.empty()
             if wanted:
                 self._show()
                 pos = current_position()
@@ -321,6 +353,8 @@ class CursorOverlay:
     def _hide(self) -> None:
         self.canvas.itemconfigure(self._sprite_id, state="hidden")
         self.canvas.itemconfigure(self._label_id, state="hidden")
+        self.canvas.itemconfigure(self._bubble_shape_id, state="hidden")
+        self.canvas.itemconfigure(self._bubble_text_id, state="hidden")
         self.win.withdraw()
         self._shown = False
 
@@ -328,6 +362,39 @@ class CursorOverlay:
         sx, sy = x + _OFFSET[0], y + _OFFSET[1]
         self.canvas.coords(self._sprite_id, sx, sy)
         self.canvas.coords(self._label_id, sx + _SPRITE_SIZE / 2, sy + _SPRITE_SIZE + 1)
+        self._place_narration(sx, sy)
+
+    def _place_narration(self, sx: float, sy: float) -> None:
+        """Draw a compact rounded bubble above/right of the cursor sprite."""
+        if not self._narration_text or time.monotonic() >= self._narration_until:
+            self.canvas.itemconfigure(self._bubble_shape_id, state="hidden")
+            self.canvas.itemconfigure(self._bubble_text_id, state="hidden")
+            return
+
+        # Limit visible text, but preserve word boundaries.
+        text = self._narration_text
+        if len(text) > 420:
+            text = text[:417].rsplit(" ", 1)[0] + "…"
+        self.canvas.itemconfigure(self._bubble_text_id, text=text, state="normal")
+        self.canvas.itemconfigure(self._bubble_shape_id, state="normal")
+        self.canvas.coords(self._bubble_text_id, sx + 5, sy - 69)
+        bbox = self.canvas.bbox(self._bubble_text_id)
+        if not bbox:
+            return
+        x1, y1, x2, y2 = bbox
+        pad_x, pad_y = 11, 8
+        # Keep the bubble inside the virtual desktop and flip below the avatar
+        # if it would cross the top edge.
+        bx1, by1, bx2, by2 = x1-pad_x, y1-pad_y, x2+pad_x, y2+pad_y
+        if by1 < 4:
+            shift = (sy + _SPRITE_SIZE + 12) - by1
+            by1 += shift; by2 += shift
+            self.canvas.coords(self._bubble_text_id, x1, y1 + shift)
+        bx1 = max(4, min(bx1, self._vw - (bx2-bx1) - 4))
+        bx2 = min(self._vw - 4, bx1 + (x2-x1) + 2*pad_x)
+        points = [bx1+10,by1, bx2-10,by1, bx2,by1+10, bx2,by2-10,
+                  bx2-10,by2, bx1+10,by2, bx1,by2-10, bx1,by1+10]
+        self.canvas.coords(self._bubble_shape_id, *points)
 
     def _drain_pings(self) -> None:
         while True:
