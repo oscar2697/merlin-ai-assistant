@@ -342,41 +342,51 @@ def _is_noise(text: str) -> bool:
 
 
 def transcribe_audio_stt(audio_path: str) -> dict:
-    """faster-whisper transcription with es/en detection.
+    """Transcribe speech with faster-whisper.
 
-    MERLIN_STT_LANGUAGE=es|en forces the language ("auto" by default)."""
+    Spanish is the default because MERLIN's primary interaction language is
+    Spanish. Set MERLIN_STT_LANGUAGE=auto for bilingual auto-detection or =en
+    for English-only use. Returns text, language, and language_probability.
+    """
     try:
         import numpy as np
 
         model = _get_whisper()
         with wave.open(str(audio_path), "rb") as wf:
             frames = wf.readframes(wf.getnframes())
-        # int16 PCM -> float32 in [-1, 1]; passing an array avoids the `av` decoder
         audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
 
-        forced = os.environ.get("MERLIN_STT_LANGUAGE", "auto").strip().lower()
+        forced = os.environ.get("MERLIN_STT_LANGUAGE", "es").strip().lower()
+        if forced not in ("es", "en", "auto", ""):
+            logger.warning("Unsupported MERLIN_STT_LANGUAGE=%r; using Spanish", forced)
+            forced = "es"
+
         if forced in ("es", "en"):
-            language = forced
+            # Avoid Whisper mistaking short Spanish commands for English.
+            text, info = _run_whisper(model, audio, forced)
         else:
-            # Primera pasada: deja a Whisper decidir entre es/en
             text, info = _run_whisper(model, audio, None)
-            if getattr(info, "language", None) not in ("es", "en") \
-                    or getattr(info, "language_probability", 1.0) < 0.5:
-                # Whisper no está seguro o detectó otro idioma -> reintenta en español
-                text, info = _run_whisper(model, audio, "es")
-            language = getattr(info, "language", None)
-        language = None if forced in ("", "auto") else forced
-        text, info = _run_whisper(model, audio, language)
-        if language is None and info.language not in _ALLOWED_LANGS:
-            logger.info("Whisper detected '%s' (p=%.2f): retrying as Spanish",
-                        info.language, getattr(info, "language_probability", 0.0))
-            text, info = _run_whisper(model, audio, "es")
+            detected = getattr(info, "language", None)
+            probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+            if detected not in _ALLOWED_LANGS or probability < 0.65:
+                # For ambiguous short utterances, Spanish is the safer fallback.
+                logger.info("Whisper language uncertain (%s, p=%.2f); retrying Spanish",
+                            detected, probability)
+                es_text, es_info = _run_whisper(model, audio, "es")
+                if es_text:
+                    text, info = es_text, es_info
+
         if _is_noise(text):
             logger.info("Discarded transcript (silence/hallucination): %r", text)
             return {"ok": False,
-                    "error": "No te entendí bien, repítelo por favor."}
-        return {"ok": True, "text": text,
-                "language": getattr(info, "language", None)}
+                    "error": "No te entendí bien. Habla un poco más cerca del micrófono o repite la instrucción."}
+
+        language = getattr(info, "language", None)
+        probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+        logger.info("STT result: language=%s probability=%.2f text=%r",
+                    language, probability, text)
+        return {"ok": True, "text": text, "language": language,
+                "language_probability": probability}
     except ImportError:
         return {"ok": False, "error": "faster-whisper not installed - STT unavailable."}
     except Exception as exc:

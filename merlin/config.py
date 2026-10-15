@@ -34,7 +34,7 @@ class MerlinConfig:
     # Interim wake phrase: "hey jarvis" (openwakeword pretrained; the project
     # was codenamed JARVIS). A custom "Merlin"/"Arthur" model is a pending
     # openwakeword training task.
-    wake_words: tuple = ("merlin", "arthur", "jarvis")
+    wake_words: tuple = ("jarvis",)  # pretrained model; Merlin/Arthur need a custom model
     whisper_model_size: str = os.getenv("MERLIN_WHISPER_SIZE", "small")
     piper_voices: dict = field(
         default_factory=lambda: {
@@ -46,9 +46,9 @@ class MerlinConfig:
     # Endpointing: record until ~silence_end_ms of silence after speech.
     # record_seconds is now only the legacy/fixed-window fallback maximum.
     record_seconds: int = 8
-    record_max_seconds: int = 20      # hard cap for an endpointed utterance
-    silence_end_ms: int = 1000        # how long quiet means "he finished"
-    pre_speech_buffer_ms: int = 300   # pre-roll so the first word is not clipped
+    record_max_seconds: int = 25      # hard cap for an endpointed utterance
+    silence_end_ms: int = 1300        # how long quiet means "he finished"
+    pre_speech_buffer_ms: int = 480   # pre-roll so the first word is not clipped
 
     # --- Behaviour ---
     max_chat_history_messages: int = 6  # shorter prompts = less thinking + faster prefill

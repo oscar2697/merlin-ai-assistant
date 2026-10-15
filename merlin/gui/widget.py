@@ -1,7 +1,14 @@
-"""MERLIN's floating desktop widget: pure-vector wizard PEEKING from behind
-the taskbar (design-mock proportions). Hair is drawn BEHIND the face so the
-smooth tufts frame it instead of covering it. Crop falls just below the eyes.
-Scene graph created ONCE; the ~30 fps loop only calls coords()/itemconfigure().
+"""MERLIN's floating desktop widget.
+
+Two back-ends, chosen automatically at boot:
+- LAYERED RIG (preferred): ~/merlin/avatar/{base,blink,iris_l,iris_r,mask_l,
+  mask_r}.png composited by gui/avatar_rig.py - blinking, eyes that track the
+  cursor, a lean-in while listening, a speech bounce and a sleep mode that
+  sinks behind the taskbar after 2 min of inactivity.
+- VECTOR PEEK (fallback when the layers are missing): the pure-canvas wizard
+  leaning over the taskbar; scene created ONCE, ~30 fps coords() only.
+
+The panel peeks over the taskbar. Click = island input, right-click = menu.
 """
 from __future__ import annotations
 
@@ -9,6 +16,7 @@ import json
 import logging
 import math
 import time
+import textwrap
 from pathlib import Path
 
 logger = logging.getLogger("merlin.gui.widget")
@@ -24,7 +32,13 @@ _BAND = "#8a5a2b"
 _SPARK = "#8fe9ff"
 
 _STATE = {"idle": "#2f8cff", "listening": "#00D2FF",
-          "thinking": "#F59E0B", "speaking": "#7FD48A"}
+          "thinking": "#F59E0B", "speaking": "#7FD48A", "sleep": "#3a4a66"}
+_STATUS_TEXT = {"idle": "Waiting for wake word", "listening": "Listening",
+                "thinking": "Thinking", "speaking": "Speaking",
+                "sleep": "Sleeping"}
+_STATUS_COLOR = {"idle": "#9fb3c8", "listening": "#00D2FF",
+                 "thinking": "#F59E0B", "speaking": "#7FD48A",
+                 "sleep": "#5b6b85"}
 
 _NARRATION_MAP = {
     "os_agent": "Ejecutando tarea...", "web_agent": "Researching...",
@@ -63,6 +77,16 @@ class MerlinWidget:
         self._wake_ticks = 0
         self._peek = _PEEK["idle"]
         self._narration = {"text": "", "until": 0.0}
+        self._last_active = time.time()
+
+        # Layered avatar rig (blink / gaze / lean / sleep); the vector peek is
+        # the graceful fallback when the ~/merlin/avatar layers are missing.
+        from merlin.gui.avatar_rig import AvatarRig
+        self.rig = AvatarRig(width=320)
+        if self.rig.ok:
+            self._W, self._H = self.rig.size[0], self.rig.size[1] + 70
+        else:
+            self._W, self._H = _W, _H
 
         self.win = tk.Toplevel(app)
         self.win.withdraw()
@@ -80,9 +104,12 @@ class MerlinWidget:
         self.canvas.bind("<ButtonRelease-1>", self._release)
         self.canvas.bind("<Button-3>", self._context_menu)
 
-        self._build_scene()
-        self.win.geometry(f"{_W}x{_H}+{self._x}+{self._y}")
-        self.canvas.configure(width=_W, height=_H)
+        if self.rig.ok:
+            self._build_peek()
+        else:
+            self._build_scene()
+        self.win.geometry(f"{self._W}x{self._H}+{self._x}+{self._y}")
+        self.canvas.configure(width=self._W, height=self._H)
         self.win.deiconify()
         self._tick()
 
@@ -106,15 +133,15 @@ class MerlinWidget:
 
     def _load_pos(self):
         wa_l, wa_t, wa_r, wa_b = self._work_area()
-        default_x = wa_l + (wa_r - wa_l - _W) // 2
-        default_y = wa_b - _H
+        default_x = wa_l + (wa_r - wa_l - self._W) // 2
+        default_y = wa_b - self._H                 # peeks over the taskbar
         try:
             data = json.loads(_POS_FILE.read_text(encoding="utf-8"))
             x, y = int(data["x"]), int(data["y"])
         except Exception:
             return default_x, default_y
-        x = min(max(x, wa_l + 12), wa_r - _W - 12)
-        y = min(max(y, wa_t + 12), wa_b - _H)
+        x = min(max(x, wa_l + 12), wa_r - self._W - 12)
+        y = min(max(y, wa_t + 12), wa_b - self._H)
         return x, y
 
     def _save_pos(self) -> None:
@@ -124,6 +151,71 @@ class MerlinWidget:
                                  encoding="utf-8")
         except Exception:
             pass
+
+    # -------------------------------------------------------------- rig back-end
+    def _build_peek(self) -> None:
+        """Layered avatar: one PhotoImage updated in place (no flicker/GC) plus
+        the status label at the top-right of the panel."""
+        from PIL import Image, ImageTk
+        w, h = self.rig.size
+        self._peek_photo = ImageTk.PhotoImage(Image.new("RGB", (w, h), (1, 1, 1)))
+        self.canvas.create_image(self._W // 2, self._H,
+                                 image=self._peek_photo, anchor="s")
+        self._status = self.canvas.create_text(self._W - 10, 8, anchor="ne",
+                                               text="", font=("Segoe UI Light", 12))
+
+    def _look_at(self):
+        """Cursor direction relative to the avatar's eyes, in -1..1."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            pt = wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            w, h = self.rig.size
+            ex = self.win.winfo_rootx() + (self._W - w) // 2 + self.rig.eye_center[0]
+            ey = self.win.winfo_rooty() + self._H - h + self.rig.eye_center[1]
+            sw = self.win.winfo_screenwidth()
+            sh = self.win.winfo_screenheight()
+            return (max(-1.0, min(1.0, (pt.x - ex) / (sw * 0.3))),
+                    max(-1.0, min(1.0, (pt.y - ey) / (sh * 0.3))))
+        except Exception:
+            return None
+
+    def _update_peek(self) -> None:
+        from PIL import Image
+        c = self.canvas
+        self.rig.state = self.state
+        frame = self.rig.frame(time.time(), self._look_at())
+        flat = Image.new("RGBA", frame.size, (1, 1, 1, 255))  # key colour bg
+        flat.alpha_composite(frame)
+        self._peek_photo.paste(flat.convert("RGB"))           # in-place: no new images
+        c.itemconfigure(self._status, text=_STATUS_TEXT[self.state],
+                        fill=_STATUS_COLOR[self.state])
+        c.delete("narr")
+        if self._narration["text"] and time.time() < self._narration["until"]:
+            self._draw_narration(c)
+
+    def _draw_narration(self, c) -> None:
+        """Transient SPEECH bubble (with a little tail) at the top of the panel."""
+        raw = self._narration["text"]
+        lines = []
+        for paragraph in raw.splitlines() or [raw]:
+            lines.extend(textwrap.wrap(paragraph, width=30) or [""])
+        lines = lines[:4]
+        text = "\n".join(lines)
+        w = min(self._W - 16, max(150, max(len(line) for line in lines) * 7 + 42))
+        h, r = 24 + 16 * len(lines), 12
+        x1, y1 = self._W // 2 - w / 2, 6
+        x2, y2 = x1 + w, y1 + h
+        c.create_polygon(_rounded_rect(x1, y1, x2, y2, r), smooth=True,
+                         fill="#0b1729", outline="#65cfff", width=2, tags="narr")
+        c.create_oval(x1+11, y1+10, x1+19, y1+18,
+                      fill="#65cfff", outline="", tags="narr")
+        c.create_text(x1+26, (y1 + y2) / 2, text=text, anchor="w",
+                      width=w-36, justify="left", fill="#edf7ff",
+                      font=("Segoe UI", 10), tags="narr")
+        c.create_polygon(x2 - 30, y2, x2 - 14, y2, x2 - 22, y2 + 12,
+                         fill="#0f2238", outline="#2f9bff", tags="narr")
 
     # ------------------------------------------------------------ scene
     def _build_scene(self) -> None:
@@ -253,6 +345,9 @@ class MerlinWidget:
             self.win.after(_FRAME_MS, self._tick)
 
     def _update_scene(self) -> None:
+        if self.rig.ok:
+            self._update_peek()
+            return
         c, b = self.canvas, self._bust
         dx, dy = self._gaze()
         self._layout_bust(dx, dy, math.sin(self._phase * 1.3) * 2.0)
@@ -291,12 +386,19 @@ class MerlinWidget:
             for it in items:
                 c.itemconfigure(it, state="hidden")
             return
-        w = max(120, 8 * len(text) + 28)
-        x1, y1, h, r = _AX - w / 2, 6, 30, 12
+        lines = []
+        for paragraph in text.splitlines() or [text]:
+            lines.extend(textwrap.wrap(paragraph, width=30) or [""])
+        lines = lines[:4]
+        wrapped = "\n".join(lines)
+        w = min(self._W - 16, max(150, max(len(line) for line in lines) * 7 + 42))
+        h, r = 24 + 16 * len(lines), 12
+        x1, y1 = _AX - w / 2, 6
         x2, y2 = x1 + w, y1 + h
         c.coords(self._narr["poly"], *_rounded_rect(x1, y1, x2, y2, r))
-        c.coords(self._narr["text"], (x1 + x2) / 2, (y1 + y2) / 2)
-        c.itemconfigure(self._narr["text"], text=text)
+        c.coords(self._narr["text"], x1 + 26, (y1 + y2) / 2)
+        c.itemconfigure(self._narr["text"], text=wrapped, anchor="w",
+                        width=w-36, justify="left")
         for i, (bx, by, rr) in enumerate(((x2 - 18, y2 + 7, 4),
                                           (x2 - 8, y2 + 16, 2.5))):
             dot = self._narr["d1"] if i == 0 else self._narr["d2"]
