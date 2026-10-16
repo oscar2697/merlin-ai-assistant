@@ -26,6 +26,44 @@ logger = logging.getLogger("merlin.tools.system")
 CHROME_PROFILE = os.environ.get("MERLIN_CHROME_PROFILE", "Profile 1")
 
 
+# Optional bridge to the GUI cursor. Tool calls still work in CLI/headless mode.
+def _cursor_call(name: str, *args, **kwargs):
+    try:
+        from merlin.gui import cursor_overlay
+        fn = getattr(cursor_overlay, name, None)
+        if callable(fn):
+            return fn(*args, **kwargs)
+    except Exception:
+        logger.debug("cursor bridge %s unavailable", name, exc_info=True)
+    return None
+
+
+def _cursor_start_point() -> tuple[int, int]:
+    try:
+        from merlin.gui import cursor_overlay
+        fn = getattr(cursor_overlay, "_start_button_point", None)
+        if callable(fn):
+            return fn()
+    except Exception:
+        pass
+    try:
+        import ctypes
+        return int(ctypes.windll.user32.GetSystemMetrics(0) // 2), int(ctypes.windll.user32.GetSystemMetrics(1) - 26)
+    except Exception:
+        return 960, 1054
+
+
+def _cursor_window_point(app_name: str) -> tuple[int, int] | None:
+    try:
+        from merlin.gui import cursor_overlay
+        fn = getattr(cursor_overlay, "_active_window_point", None)
+        if callable(fn):
+            return fn(app_name)
+    except Exception:
+        pass
+    return None
+
+
 def check_command_safety(command: str) -> Tuple[bool, str]:
     """Enforce the minimal blacklist of irreversible actions."""
     c = (command or "").lower()
@@ -130,18 +168,31 @@ def _launch_chrome(url: str = "") -> bool:
 
 
 def search_web(query: str) -> dict:
-    """Open a Google search for `query` in Chrome (default browser as fallback)."""
+    """Open a web search and animate the cursor from the wizard to the browser."""
     query = (query or "").strip()
     if not query:
         return {"ok": False, "error": "No search query provided."}
     url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
+    _cursor_call("task_step", f"Preparando búsqueda: {query[:80]}",
+                 _cursor_start_point(), click=True, duration=0.22)
     try:
         if sys.platform == "win32" and _launch_chrome(url):
-            return {"ok": True, "query": query, "url": url, "method": "chrome"}
-        webbrowser.open(url)
-        return {"ok": True, "query": query, "url": url, "method": "default browser"}
+            result = {"ok": True, "query": query, "url": url, "method": "chrome"}
+        else:
+            webbrowser.open(url)
+            result = {"ok": True, "query": query, "url": url, "method": "default browser"}
+        time.sleep(0.35)
+        target = _cursor_window_point("chrome") or _cursor_window_point("browser")
+        if target:
+            _cursor_call("task_step", "Abriendo resultados en el navegador", target,
+                         click=True, duration=0.30)
+        else:
+            _cursor_call("task_step", "Cargando resultados de búsqueda")
+        _cursor_call("task_step", "Búsqueda abierta; revisando los resultados")
+        return result
     except Exception as exc:
         logger.exception("search_web failed")
+        _cursor_call("task_step", f"Error al buscar: {exc}")
         return {"ok": False, "error": str(exc)}
 
 
@@ -181,8 +232,8 @@ def _find_start_app(app_name: str) -> dict | None:
     return None
 
 
-def open_app(app_name: str) -> dict:
-    """Open any installed application by name (near-total control model)."""
+def _open_app_impl(app_name: str) -> dict:
+    """Launch an installed application through the platform launcher."""
     app_name = (app_name or "").strip()
     if not app_name:
         return {"ok": False, "error": "No application name provided."}
@@ -223,6 +274,38 @@ def open_app(app_name: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+
+def open_app(app_name: str) -> dict:
+    """Open an app and animate MERLIN's independent cursor through the task."""
+    name = (app_name or "").strip()
+    if not name:
+        return {"ok": False, "error": "No application name provided."}
+    start = _cursor_start_point()
+    _cursor_call("task_step", f"Buscando {name}", start, click=True, duration=0.25)
+    result = _open_app_impl(name)
+    if result.get("ok"):
+        _cursor_call("task_step", f"Abriendo {result.get('app', name)}")
+        # The app launcher is API-based for reliability; move the visible agent
+        # cursor to the resulting window so the animation reflects the action.
+        time.sleep(0.30)
+        target = _cursor_window_point(name)
+        if target:
+            _cursor_call("task_step", f"Enfocando {result.get('app', name)}", target,
+                         click=True, duration=0.32)
+        else:
+            try:
+                import ctypes
+                target = (ctypes.windll.user32.GetSystemMetrics(0)//2,
+                          ctypes.windll.user32.GetSystemMetrics(1)//2)
+                _cursor_call("task_step", f"Aplicación abierta: {result.get('app', name)}",
+                             target, click=True, duration=0.28)
+            except Exception:
+                _cursor_call("task_step", f"Aplicación abierta: {result.get('app', name)}")
+    else:
+        _cursor_call("task_step", f"No pude abrir {name}: {result.get('error', 'error desconocido')}")
+    return result
+
+
 def _find_start_menu_shortcut(app_name: str) -> Path | None:
     if sys.platform != "win32":
         return None
@@ -248,12 +331,25 @@ def interact_gui_app(app_name: str, action: str, payload: str = "") -> dict:
         return {"ok": False, "error": "pyautogui not installed - GUI automation unavailable."}
     try:
         action = (action or "").lower().strip()
+        _cursor_call("task_step", f"Acción {action} en {app_name}")
         if action == "focus":
             open_app(app_name)
             time.sleep(1.0)
             return {"ok": True, "action": "focus", "app": app_name}
         if action == "type":
-            pyautogui.click()
+            # Focus the target app first; avoid a coordinate-less click at the
+            # wizard's origin. Typing then goes to the foreground app as intended.
+            try:
+                from pywinauto import Desktop
+                active = Desktop(backend="uia").get_active()
+                focused = active.get_focus() if active else None
+                if focused:
+                    rect = focused.rectangle()
+                    pt = (int((rect.left + rect.right) / 2), int((rect.top + rect.bottom) / 2))
+                    _cursor_call("task_step", f"Seleccionando campo de texto en {app_name}", pt, click=True, duration=0.20)
+                    focused.set_focus()
+            except Exception:
+                logger.debug("could not locate focused input control", exc_info=True)
             pyautogui.typewrite(payload, interval=0.02)
             return {"ok": True, "action": "type", "app": app_name}
         if action == "hotkey":

@@ -8,7 +8,7 @@ Two back-ends, chosen automatically at boot:
 - VECTOR PEEK (fallback when the layers are missing): the pure-canvas wizard
   leaning over the taskbar; scene created ONCE, ~30 fps coords() only.
 
-The panel peeks over the taskbar. Click = island input, right-click = menu.
+The panel peeks over the taskbar. Click = open the chat to type, right-click = menu.
 """
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ import json
 import logging
 import math
 import time
-import textwrap
 from pathlib import Path
 
 logger = logging.getLogger("merlin.gui.widget")
@@ -33,11 +32,13 @@ _SPARK = "#8fe9ff"
 
 _STATE = {"idle": "#2f8cff", "listening": "#00D2FF",
           "thinking": "#F59E0B", "speaking": "#7FD48A", "sleep": "#3a4a66"}
-_STATUS_TEXT = {"idle": "Waiting for wake word", "listening": "Listening",
-                "thinking": "Thinking", "speaking": "Speaking",
-                "sleep": "Sleeping"}
-_STATUS_COLOR = {"idle": "#9fb3c8", "listening": "#00D2FF",
-                 "thinking": "#F59E0B", "speaking": "#7FD48A",
+# Status captions are intentionally tiny and muted; the avatar's animation
+# communicates listening/speaking without covering the desktop.
+_STATUS_TEXT = {"idle": "", "listening": "listening",
+                "thinking": "thinking", "speaking": "speaking",
+                "sleep": ""}
+_STATUS_COLOR = {"idle": "#9fb3c8", "listening": "#4d687c",
+                 "thinking": "#8c6a32", "speaking": "#4e8061",
                  "sleep": "#5b6b85"}
 
 _NARRATION_MAP = {
@@ -189,30 +190,23 @@ class MerlinWidget:
         flat = Image.new("RGBA", frame.size, (1, 1, 1, 255))  # key colour bg
         flat.alpha_composite(frame)
         self._peek_photo.paste(flat.convert("RGB"))           # in-place: no new images
-        c.itemconfigure(self._status, text=_STATUS_TEXT[self.state],
-                        fill=_STATUS_COLOR[self.state])
+        status_text = _STATUS_TEXT[self.state]
+        c.itemconfigure(self._status, text=status_text,
+                        fill=_STATUS_COLOR[self.state],
+                        font=("Segoe UI Light", 6 if self.state == "listening" else 7))
         c.delete("narr")
         if self._narration["text"] and time.time() < self._narration["until"]:
             self._draw_narration(c)
 
     def _draw_narration(self, c) -> None:
         """Transient SPEECH bubble (with a little tail) at the top of the panel."""
-        raw = self._narration["text"]
-        lines = []
-        for paragraph in raw.splitlines() or [raw]:
-            lines.extend(textwrap.wrap(paragraph, width=30) or [""])
-        lines = lines[:4]
-        text = "\n".join(lines)
-        w = min(self._W - 16, max(150, max(len(line) for line in lines) * 7 + 42))
-        h, r = 24 + 16 * len(lines), 12
-        x1, y1 = self._W // 2 - w / 2, 6
+        text = self._narration["text"]
+        w = max(120, 8 * len(text) + 28)
+        x1, y1, h, r = self._W // 2 - w / 2, 6, 30, 12
         x2, y2 = x1 + w, y1 + h
         c.create_polygon(_rounded_rect(x1, y1, x2, y2, r), smooth=True,
-                         fill="#0b1729", outline="#65cfff", width=2, tags="narr")
-        c.create_oval(x1+11, y1+10, x1+19, y1+18,
-                      fill="#65cfff", outline="", tags="narr")
-        c.create_text(x1+26, (y1 + y2) / 2, text=text, anchor="w",
-                      width=w-36, justify="left", fill="#edf7ff",
+                         fill="#0f2238", outline="#2f9bff", width=2, tags="narr")
+        c.create_text((x1 + x2) / 2, (y1 + y2) / 2, text=text, fill="#d6ecff",
                       font=("Segoe UI", 10), tags="narr")
         c.create_polygon(x2 - 30, y2, x2 - 14, y2, x2 - 22, y2 + 12,
                          fill="#0f2238", outline="#2f9bff", tags="narr")
@@ -386,19 +380,12 @@ class MerlinWidget:
             for it in items:
                 c.itemconfigure(it, state="hidden")
             return
-        lines = []
-        for paragraph in text.splitlines() or [text]:
-            lines.extend(textwrap.wrap(paragraph, width=30) or [""])
-        lines = lines[:4]
-        wrapped = "\n".join(lines)
-        w = min(self._W - 16, max(150, max(len(line) for line in lines) * 7 + 42))
-        h, r = 24 + 16 * len(lines), 12
-        x1, y1 = _AX - w / 2, 6
+        w = max(120, 8 * len(text) + 28)
+        x1, y1, h, r = _AX - w / 2, 6, 30, 12
         x2, y2 = x1 + w, y1 + h
         c.coords(self._narr["poly"], *_rounded_rect(x1, y1, x2, y2, r))
-        c.coords(self._narr["text"], x1 + 26, (y1 + y2) / 2)
-        c.itemconfigure(self._narr["text"], text=wrapped, anchor="w",
-                        width=w-36, justify="left")
+        c.coords(self._narr["text"], (x1 + x2) / 2, (y1 + y2) / 2)
+        c.itemconfigure(self._narr["text"], text=text)
         for i, (bx, by, rr) in enumerate(((x2 - 18, y2 + 7, 4),
                                           (x2 - 8, y2 + 16, 2.5))):
             dot = self._narr["d1"] if i == 0 else self._narr["d2"]
@@ -426,17 +413,18 @@ class MerlinWidget:
                        borderwidth=0)
         menu.add_command(label="🎤  Push-to-talk",
                          command=self.app.push_to_talk_async)
-        menu.add_command(label="⌨  Escribir a MERLIN", command=self.summon_island)
+        menu.add_command(label="⌨  Escribir a MERLIN", command=self.summon_chat)
         menu.add_command(label="💬  Ver chat completo",
                          command=self.app.toggle_dashboard)
         menu.add_separator()
         menu.add_command(label="🚪  Salir de MERLIN", command=self.app.quit_app)
         menu.tk_popup(event.x_root, event.y_root)
 
-    def summon_island(self) -> None:
-        island = getattr(self.app, "island", None)
-        if island:
-            island.reveal(input_focus=True)
+    def summon_chat(self) -> None:
+        """Avatar click: open the right-side write card (never the dashboard)."""
+        open_input = getattr(self.app, "open_input", None)
+        if open_input:
+            open_input()
 
     def _press(self, event) -> None:
         self._drag = {"x0": event.x_root, "y0": event.y_root,
@@ -459,7 +447,7 @@ class MerlinWidget:
         if self._drag["moved"]:
             self._save_pos()
         else:
-            self.summon_island()
+            self.summon_chat()
         self._drag = None
 
     # ------------------------------------------------------------ public API
@@ -467,10 +455,8 @@ class MerlinWidget:
         previous = self.state
         if state in _STATE:
             self.state = state
-        if detail:
-            narration = _NARRATION_MAP.get(str(detail).lower())
-            if narration:
-                self.narrate(narration)
+        # Dialogue bubbles are now rendered by cursor_overlay. Keep the avatar
+        # animation/state here so text is not duplicated in two places.
         if previous == "idle" and state != "idle":
             self._wake_ticks = 24
 
