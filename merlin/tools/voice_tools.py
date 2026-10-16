@@ -49,8 +49,10 @@ _WHISPER_MODEL = None     # faster-whisper model, loaded once and reused
 _WAKEWORD_DIR = Path.home() / "merlin" / "wakewords"
 
 # Biases Whisper towards names it tends to mishear ("what's up" -> WhatsApp).
-_STT_HINT = "Merlin, WhatsApp, Spotify, iTunes, Chrome, Discord, Visual Studio Code, Steam, YouTube"
-_HINT_TOKENS = frozenset(re.findall(r"\w+", _STT_HINT.lower()))
+_STT_HINT = ("Transcribe una instrucción hablada con precisión en español. "
+             "Nombres propios posibles: Merlin, WhatsApp, Spotify, iTunes, "
+             "Chrome, Discord, Visual Studio Code, Steam y YouTube.")
+_HINT_TOKENS = frozenset({"merlin", "whatsapp", "spotify", "itunes", "chrome", "discord", "visual", "studio", "code", "steam", "youtube"})
 
 # Whisper was trained on YouTube: with background voices or silence it tends to
 # emit these. Never a real command.
@@ -283,7 +285,11 @@ def record_audio(seconds: int = None) -> Path | None:
             logger.info("record_audio: no speech detected")
             return None
         audio = np.concatenate(chunks)
-        tmp = Path(tempfile.gettempdir()) / f"merlin_mic_{int(time.time())}.wav"
+        # Unique name prevents simultaneous GUI/graph recordings from overwriting
+        # one another when two turns start in the same second.
+        with tempfile.NamedTemporaryFile(prefix="merlin_mic_", suffix=".wav",
+                                         delete=False) as handle:
+            tmp = Path(handle.name)
         with wave.open(str(tmp), "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
@@ -315,13 +321,13 @@ def _run_whisper(model, audio, language: str | None):
         audio, language=language, task="transcribe",
         initial_prompt=_STT_HINT,
         beam_size=5,
-        temperature=0.0,                    # no fallback to random sampling
+        temperature=0.0,                    # deterministic decoding
         condition_on_previous_text=False,   # one utterance: no drifting context
-        vad_filter=True,                    # ignore everything that is not speech
-        vad_parameters={"min_silence_duration_ms": 500},
-        no_speech_threshold=0.6,
+        vad_filter=True,                    # suppress background/no-speech segments
+        vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 180},
+        no_speech_threshold=0.55,
         log_prob_threshold=-1.0,
-        compression_ratio_threshold=2.4,
+        compression_ratio_threshold=2.2,
     )
     kept = []
     for seg in segments:  # decoding happens while iterating
@@ -344,8 +350,8 @@ def _is_noise(text: str) -> bool:
 def transcribe_audio_stt(audio_path: str) -> dict:
     """Transcribe speech with faster-whisper.
 
-    Spanish is the default because MERLIN's primary interaction language is
-    Spanish. Set MERLIN_STT_LANGUAGE=auto for bilingual auto-detection or =en
+    Spanish is forced by default to avoid short Spanish commands being classified
+    as English. Set MERLIN_STT_LANGUAGE=auto for bilingual auto-detection or =en
     for English-only use. Returns text, language, and language_probability.
     """
     try:
@@ -355,6 +361,15 @@ def transcribe_audio_stt(audio_path: str) -> dict:
         with wave.open(str(audio_path), "rb") as wf:
             frames = wf.readframes(wf.getnframes())
         audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        if audio.size == 0:
+            return {"ok": False, "error": "La grabación está vacía; repite la instrucción."}
+        # Gently normalize quiet microphone input. Do not amplify near-silence,
+        # which would magnify room noise and make Whisper hallucinate words.
+        peak = float(np.max(np.abs(audio)))
+        rms = float(np.sqrt(np.mean(np.square(audio))))
+        if peak >= 0.008 and rms >= 0.002:
+            gain = min(4.0, 0.12 / max(rms, 1e-6))
+            audio = np.clip(audio * gain, -0.98, 0.98)
 
         forced = os.environ.get("MERLIN_STT_LANGUAGE", "es").strip().lower()
         if forced not in ("es", "en", "auto", ""):
