@@ -41,7 +41,7 @@ _WRAP = 580
 
 
 def _state_for(status: str) -> str:
-    """Raw status event -> avatar/island state (idle, listening, thinking, speaking).
+    """Raw status event -> avatar/chat state (idle, listening, thinking, speaking).
 
     'waiting for wake word' is IDLE (the wizard is just waiting); LISTENING means
     the microphone is actually capturing or transcribing; any graph node working
@@ -89,14 +89,13 @@ class MerlinApp(ctk.CTk):
         self.runtime = runtime
         self.voice_mode = tkinter.BooleanVar(value=False)
         self._stream_bubble = None   # streaming MERLIN bubble (being filled)
-        self._last_cursor_narration_len = 0
         self._last_heard = ""       # last voice transcription (session logic)
         self._wake_stop = threading.Event()
         self._mic_busy = threading.Lock()  # only one microphone user at a time
 
         self.title("MERLIN — Local AI Assistant")
-        self.geometry("860x660")
-        self.minsize(640, 480)
+        self.geometry("1000x760")
+        self.minsize(760, 560)
         self._build_widgets()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(self.POLL_MS, self._poll_events)
@@ -105,8 +104,9 @@ class MerlinApp(ctk.CTk):
 
     def _build_widgets(self) -> None:
         # --- Header: status + voice switch ---
-        header = ctk.CTkFrame(self, corner_radius=10)
-        header.pack(fill="x", padx=14, pady=(14, 6))
+        self.header = ctk.CTkFrame(self, corner_radius=10)
+        self.header.pack(fill="x", padx=14, pady=(14, 6))
+        header = self.header
         self.status_label = ctk.CTkLabel(
             header, text="Status: idle",
             font=ctk.CTkFont(size=13, weight="bold"))
@@ -121,8 +121,9 @@ class MerlinApp(ctk.CTk):
         self.chat.pack(fill="both", expand=True, padx=10, pady=6)
 
         # --- Input row ---
-        row = ctk.CTkFrame(self, corner_radius=10)
-        row.pack(fill="x", padx=14, pady=(6, 14))
+        self.input_row = ctk.CTkFrame(self, corner_radius=10)
+        self.input_row.pack(fill="x", padx=14, pady=(6, 14))
+        row = self.input_row
         self.entry = ctk.CTkEntry(
             row, placeholder_text="Speak or type your request...",
             font=ctk.CTkFont(size=14))
@@ -135,19 +136,25 @@ class MerlinApp(ctk.CTk):
             row, text="🎙", width=56, command=self._on_mic)
         self.mic_btn.pack(side="left", padx=(0, 10))
 
-        # --- MERLIN's visible cursor overlay + floating widget + island bar ---
+        # --- MERLIN's visible cursor overlay + floating widget ---
         if cursor_overlay.overlay_enabled():
             cursor_overlay.attach(cursor_overlay.CursorOverlay(self))
+            cursor_overlay.set_input_handler(self._submit_from_card)
         self.widget = None
-        self.island = None
         self._widget_mode = os.environ.get("MERLIN_WIDGET", "1") == "1"
         if self._widget_mode:
-            from merlin.gui.island import DynamicIsland
             from merlin.gui.widget import MerlinWidget
             self.widget = MerlinWidget(self)
-            self.island = DynamicIsland(self)
-            self.withdraw()  # the dashboard stays hidden (context menu of the
-            # widget opens it) - the desktop stays clean.
+            # Start MERLIN's independent pointer visually at the wizard, not at
+            # the user's native mouse. The cursor then travels from this origin.
+            try:
+                cursor_overlay.set_agent_origin(
+                    self.widget.win.winfo_rootx() + self.widget._W // 2,
+                    self.widget.win.winfo_rooty() + self.widget._H - 72)
+            except Exception:
+                logger.debug("Could not set agent cursor origin from widget", exc_info=True)
+            self.withdraw()  # the chat window stays hidden until MERLIN speaks or
+            # the wizard is clicked - the desktop stays clean.
             if voice_tools.wake_word_available():
                 # the floating wizard is always waiting for the wake word
                 self.voice_mode.set(True)
@@ -214,18 +221,49 @@ class MerlinApp(ctk.CTk):
     # ------------------------------------------------- widget bridge methods
     def toggle_dashboard(self) -> None:
         if self.state() == "withdrawn":
-            self.deiconify()
+            self.open_chat()
         else:
             self.withdraw()
 
     def widget_submit(self, query: str) -> None:
         self._append(query, "user")
+        cursor_overlay.task_start(query)
         # speak=True: text commands get spoken feedback (and the audible
         # yes/no confirmation for WhatsApp actions) even with the mic off.
         self.runtime.submit(query, voice_mode=False, speak=True)
 
+    def open_input(self) -> None:
+        """Avatar click: show the right-side write card (never the dashboard)."""
+        try:
+            cursor_overlay.open_input()
+        except Exception:
+            logger.debug("write card open failed", exc_info=True)
+
+    def _submit_from_card(self, text: str) -> None:
+        """Handle a message typed in the right-side write card."""
+        self._append(text, "user")
+        cursor_overlay.task_start(text)
+        self.runtime.submit(text, voice_mode=False, speak=True)
+
     def push_to_talk_async(self) -> None:
         self._on_mic()
+
+    # ----------------------------------------------------------- chat window
+    def open_chat(self) -> None:
+        """Open the dashboard chat with the input focused (avatar click).
+
+        The dashboard is only ever opened on demand. MERLIN's answers and
+        research results go to the right-side results card (cursor_overlay), so
+        nothing pops up on its own while MERLIN talks or works.
+        """
+        if self.state() == "withdrawn":
+            self.deiconify()
+        self.lift()
+        try:
+            self.focus_force()
+        except Exception:
+            pass
+        self.entry.focus_set()
 
     # ------------------------------------------------------- voice (threads)
     def _runtime_busy(self) -> bool:
@@ -307,13 +345,8 @@ class MerlinApp(ctk.CTk):
             return False
 
         text = result["text"]
-        if result.get("needs_confirmation"):
-            # Never run a voice command when Whisper reports low confidence.
-            # Bring the transcript into the editable chat for confirmation.
-            post_event("stt_uncertain", text)
-            return False
-
         self._last_heard = text
+        cursor_overlay.task_start(text)
         post_event("user_input", text)  # shown as a user bubble
         # speak=True: MERLIN answers out loud (streaming TTS); the turn still
         # ends after TTS (voice_mode stays False - the GUI wake loop owns listening).
@@ -331,10 +364,6 @@ class MerlinApp(ctk.CTk):
             elif event.type == "merlin_response":
                 self._finalize_stream(event.data)
                 self._widget_state("idle")
-                if self.island and event.data:
-                    show = getattr(self.island, "show_response", None)
-                    if show:
-                        show(event.data)
                 self.status_label.configure(text="Status: idle")
             elif event.type == "status":
                 self.status_label.configure(text=f"Status: {event.data}")
@@ -342,18 +371,6 @@ class MerlinApp(ctk.CTk):
                 self._widget_state(state, detail=event.data)
                 if state == "thinking":
                     self._show_typing()
-            elif event.type == "stt_uncertain":
-                transcript = str(event.data or "").strip()
-                self.deiconify()
-                self.entry.delete(0, "end")
-                self.entry.insert(0, transcript)
-                self.entry.focus_set()
-                self._append("No estoy completamente seguro de haber entendido. "
-                             "Revisa el texto del campo de entrada y pulsa Enviar "
-                             "para confirmarlo, o corrígelo antes.", "info")
-                if self.widget:
-                    self.widget.narrate("No estoy seguro de la instrucción. Revisa el texto y confírmalo.")
-                cursor_overlay.narrate("¿Entendí bien? Revisa la instrucción antes de que la ejecute.", duration=6)
             elif event.type == "error":
                 self._append(f"⚠ {event.data}", "error")
             elif event.type == "info":
@@ -362,19 +379,14 @@ class MerlinApp(ctk.CTk):
         self.after(self.POLL_MS, self._poll_events)
 
     def _widget_state(self, state: str, detail: str = None) -> None:
+        # Keep the pointer companion in sync with the wizard state. The overlay
+        # API is thread-safe and only queues work for Tk's poll loop.
+        try:
+            cursor_overlay.set_state(state, detail)
+        except Exception:
+            logger.debug("cursor state update failed", exc_info=True)
         if self.widget:
             self.widget.set_state(state, detail)
-        if self.island:
-            self.island.set_state(state, detail)
-        # Keep the desktop cursor and wizard visually in sync with the same
-        # state events instead of letting the cursor appear only on mouse calls.
-        narration = {
-            "listening": "Te escucho…",
-            "thinking": "Estoy pensando…",
-            "speaking": "Estoy respondiendo…",
-        }.get(state)
-        if narration:
-            cursor_overlay.narrate(narration, duration=2.6)
 
     def _show_typing(self) -> None:
         """While the reasoning model thinks: an animated '...' MERLIN bubble."""
@@ -382,28 +394,30 @@ class MerlinApp(ctk.CTk):
             self._stream_bubble = _Bubble(self.chat, "· · ·", who="merlin")
 
     def _render_partial(self, partial: str) -> None:
-        """Update chat continuously; update floating speech less often to avoid flicker."""
+        """Token-by-token streaming fills the MERLIN bubble in real time; the
+        wizard's speech bubble also echoes the tail of what it is saying."""
         if self._stream_bubble is None:
             self._stream_bubble = _Bubble(self.chat, partial, who="merlin")
         else:
             self._stream_bubble.set_text(partial)
-        if self.widget and partial and (len(partial) - self._last_cursor_narration_len >= 38):
-            self.widget.narrate(partial[-85:])
-        if partial and (len(partial) - self._last_cursor_narration_len >= 38
-                        or partial.rstrip().endswith((".", "!", "?", "。"))):
-            cursor_overlay.narrate(partial[-105:], duration=3.8)
-            self._last_cursor_narration_len = len(partial)
+        # The wizard keeps its animated speaking state, but all text bubbles now
+        # belong to the independent cursor to avoid duplicate dialogue sources.
 
     def _finalize_stream(self, response: str) -> None:
-        """The streamed bubble becomes the final answer bubble."""
-        if response:
-            cursor_overlay.narrate(response[-105:], duration=5.0)
-        self._last_cursor_narration_len = 0
+        """Finalize chat output and briefly echo the result beside the cursor."""
         if self._stream_bubble is not None:
             self._stream_bubble.set_text(response or "…")
             self._stream_bubble = None
         elif response:
             self._append(response, "merlin")
+        if response:
+            try:
+                # Full answers and research findings belong in the right-side
+                # results panel. The cursor bubble is reserved for short action dialogue.
+                cursor_overlay.task_result(response)
+                cursor_overlay.task_finish()
+            except Exception:
+                logger.debug("cursor task result failed", exc_info=True)
 
     def _append(self, text: str, tag: str) -> None:
         """Router: tag -> bubble kind (user / merlin / error / info)."""
