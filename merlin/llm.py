@@ -25,11 +25,17 @@ class LLMConnector:
         self.available: Optional[bool] = None
         self._detected_model: Optional[str] = None
         
-        # FIX: normaliza la URL - quita /v1 si viene del .env heredado de LM Studio
-        base = self.config.lm_studio_base_url.rstrip("/")
+        # Accept a legacy /v1 suffix, but Ollama itself uses its native API.
+        base = self.config.ollama_base_url.rstrip("/")
         if base.endswith("/v1"):
             base = base[:-3]
         self._base = base
+
+    def detect_model(self) -> str | None:
+        """Return the configured Ollama model when its tag is available."""
+        if self.available is None:
+            self.health_check()
+        return self._detected_model if self.available else None
 
     def health_check(self) -> bool:
         """Verifica si Ollama está disponible y detecta el modelo configurado."""
@@ -46,24 +52,14 @@ class LLMConnector:
             # 1. Buscar el modelo exacto que pedimos en el config
             target = self.model_name
             for name in available_models:
-                if target == name or target in name or name.startswith(target + ":"):
+                if target == name:
                     self._detected_model = name
                     self.available = True
                     logger.info("Ollama OK - serving: %s (configurado: %s)",
                             self._detected_model, target)
                     return True
             
-            # 2. Si el perfil es "fast" y apunta al mismo modelo que "main",
-            #    reutilizar el que ya está cargado
-            for name in available_models:
-                if name.startswith("gemma4:") or name.startswith("qwen3:"):
-                    logger.warning("Modelo %s no encontrado; usando %s como fallback",
-                                target, name)
-                    self._detected_model = name
-                    self.available = True
-                    return True
-            
-            # 3. Ningún modelo disponible
+            # Never silently substitute a different model.
             logger.warning("Modelo '%s' no está en Ollama. Disponibles: %s",
                         target, available_models)
             logger.info("Descárgalo con: ollama pull %s", target)
@@ -78,8 +74,8 @@ class LLMConnector:
     def chat(self, messages: List[Dict[str, str]], fallback: str = "",
              on_token=None) -> str:
         """Envía mensajes a Ollama con parámetros optimizados."""
-        if self.available is None and not self.health_check():
-            logger.warning("LLM offline - using fallback")
+        if self.available is not True and not self.health_check():
+            logger.warning("LLM offline or model missing - using fallback")
             return fallback
 
         payload = {

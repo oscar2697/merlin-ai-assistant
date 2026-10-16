@@ -43,7 +43,13 @@ def voice_listener_node(state: GraphState) -> dict:
     if audio is None:
         return append_to(state, "error_logs", "Microphone capture failed.")
 
-    result = voice_tools.transcribe_audio_stt(audio)
+    try:
+        result = voice_tools.transcribe_audio_stt(str(audio))
+    finally:
+        try:
+            audio.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Could not remove temporary microphone recording", exc_info=True)
     if not result.get("ok"):
         return append_to(state, "error_logs",
                          f"STT failed: {result.get('error', 'unknown')}")

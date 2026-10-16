@@ -1,4 +1,4 @@
-"""Central configuration for MERLIN (LM Studio, voice pipeline, paths, safety)."""
+"""Central configuration for MERLIN (Ollama, voice pipeline, paths, safety)."""
 from __future__ import annotations
 
 import os
@@ -19,16 +19,13 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 @dataclass(frozen=True)
 class MerlinConfig:
-    # --- LLM (LM Studio, OpenAI-compatible local server) ---
-    lm_studio_base_url: str = os.getenv("LM_STUDIO_BASE_URL", "http://localhost:1234/v1")
-    lm_studio_api_key: str = os.getenv("LM_STUDIO_API_KEY", "")
-    model_name: str = os.getenv("MERLIN_MODEL", "google/gemma-4-e4b")
+    # --- LLM (Ollama native API) ---
+    ollama_base_url: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    model_name: str = os.getenv("MERLIN_MODEL", "qwen2.5-coder:3b")
     # Fast non-thinking model for short syntheses (tool/web summaries).
     # Empty = use the main model everywhere.
-    fast_model_name: str = os.getenv("MERLIN_FAST_MODEL", "")
-    temperature: float = 0.1
-    llm_timeout_seconds: int = 600   # CPU inference: thinking models are slow
-    llm_max_tokens: int = 1500       # reasoning tokens + answer tokens
+    fast_model_name: str = os.getenv("MERLIN_FAST_MODEL", "qwen2.5-coder:3b")
+    llm_timeout_seconds: int = 600   # local CPU inference can be slow
 
     # --- Voice pipeline (bilingual, offline) ---
     # Interim wake phrase: "hey jarvis" (openwakeword pretrained; the project
@@ -42,7 +39,7 @@ class MerlinConfig:
             "en": "en_GB-alan-medium",  # British English per user requirement
         }
     )
-    default_language: str = "en"
+    default_language: str = "es"
     # Endpointing: record until ~silence_end_ms of silence after speech.
     # record_seconds is now only the legacy/fixed-window fallback maximum.
     record_seconds: int = 8
