@@ -25,7 +25,7 @@ class MerlinRuntime:
         self._busy = threading.Lock()
         logger.info("MERLIN graph compiled")
         # Off by default: with a slow local model the rewrite costs minutes of
-        # local-model inference time and delays the first user turn. Opt in with
+        # LM Studio time and delays the first user turn. Opt in with
         # MERLIN_SELF_IMPROVEMENT=1.
         if os.environ.get("MERLIN_SELF_IMPROVEMENT", "0") == "1":
             threading.Thread(target=self._boot_self_improvement, daemon=True,

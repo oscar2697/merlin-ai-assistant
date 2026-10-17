@@ -144,8 +144,9 @@ def paste_text(text: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-def type_into_app(app_name: str, text: str) -> dict:
-    """Focus the app's window and paste `text` at the cursor (any Unicode)."""
+def type_into_app(app_name: str, text: str, create_new_document: bool = False) -> dict:
+    """Open/focus an app, optionally create a new document, paste Unicode text,
+    and verify that the pasted text is present in the active document where possible."""
     text = (text or "").strip()
     if not text:
         return {"ok": False, "error": "No text to write."}
@@ -155,18 +156,54 @@ def type_into_app(app_name: str, text: str) -> dict:
         return {"ok": False, "error": "pyautogui not installed - typing unavailable."}
 
     focus = focus_window(app_name)
+    if not focus.get("ok") and app_name:
+        # One instruction should be enough: launch the requested app if it is not open.
+        try:
+            from merlin.tools.system_tools import open_app
+            launched = open_app(app_name)
+            if launched.get("ok"):
+                deadline = time.monotonic() + 12.0
+                while time.monotonic() < deadline:
+                    time.sleep(0.4)
+                    focus = focus_window(app_name)
+                    if focus.get("ok"):
+                        break
+        except Exception:
+            logger.exception("Could not launch app before writing")
     if not focus.get("ok"):
-        return focus
+        return {"ok": False, "error": f"No pude abrir o enfocar {app_name}: {focus.get('error', 'ventana no encontrada')}"}
 
     previous = None
     try:
         previous = _clipboard_get()
+        if create_new_document:
+            pyautogui.hotkey("ctrl", "n")
+            time.sleep(0.45)
         _clipboard_set(text)
         time.sleep(0.2)
         pyautogui.hotkey("ctrl", "v")
-        time.sleep(0.8)  # let the app finish pasting before the clipboard is restored
+        time.sleep(0.8)
+        # Verify visible document text when clipboard/UI automation permits it.
+        verified = False
+        if app_name.lower() in ("word", "microsoft word", "notepad", "bloc de notas", "wordpad"):
+            try:
+                pyautogui.hotkey("ctrl", "a")
+                pyautogui.hotkey("ctrl", "c")
+                time.sleep(0.25)
+                visible_text = _clipboard_get() or ""
+                pyautogui.press("right")  # collapse selection; do not overwrite content
+                verified = text[:min(80, len(text))].strip() in visible_text
+                if not verified:
+                    raise RuntimeError("La aplicación no confirmó que el texto insertado esté presente.")
+            except Exception as verify_exc:
+                logger.warning("Writing verification unavailable/failed: %s", verify_exc)
+                if isinstance(verify_exc, RuntimeError):
+                    return {"ok": False, "error": str(verify_exc), "app": app_name,
+                            "window": focus.get("window", ""), "chars": len(text),
+                            "pasted_attempted": True}
         return {"ok": True, "action": "write_text", "app": app_name,
-                "window": focus.get("window", ""), "chars": len(text)}
+                "window": focus.get("window", ""), "chars": len(text),
+                "verified": verified, "new_document": create_new_document}
     except Exception as exc:
         logger.exception("type_into_app failed")
         return {"ok": False, "error": str(exc)}

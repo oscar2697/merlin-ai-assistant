@@ -49,10 +49,18 @@ _WHISPER_MODEL = None     # faster-whisper model, loaded once and reused
 _WAKEWORD_DIR = Path.home() / "merlin" / "wakewords"
 
 # Biases Whisper towards names it tends to mishear ("what's up" -> WhatsApp).
-_STT_HINT = ("Transcribe una instrucción hablada con precisión en español. "
-             "Nombres propios posibles: Merlin, WhatsApp, Spotify, iTunes, "
-             "Chrome, Discord, Visual Studio Code, Steam y YouTube.")
-_HINT_TOKENS = frozenset({"merlin", "whatsapp", "spotify", "itunes", "chrome", "discord", "visual", "studio", "code", "steam", "youtube"})
+_STT_HINT = (
+    "MERLIN, WhatsApp, Spotify, iTunes, Apple Music, Chrome, Discord, "
+    "Microsoft Word, Excel, PowerPoint, Bloc de notas, Windows; física, "
+    "matrices de Pauli, mecánica cuántica, operador, espín, vector, matriz, "
+    "autovalor, autovector, ecuación, derivada, integral, relatividad, "
+    "simulación, Python, LaTeX."
+)
+# Only filter a transcript that is effectively an echo of the application-name
+# hint. Never use the full science vocabulary here: real requests such as
+# "matrices de Pauli" must not be discarded as hallucinations.
+_HINT_TOKENS = frozenset(re.findall(
+    r"\w+", "merlin whatsapp spotify itunes chrome discord steam youtube word excel powerpoint".lower()))
 
 # Whisper was trained on YouTube: with background voices or silence it tends to
 # emit these. Never a real command.
@@ -191,8 +199,8 @@ def listen_wake_word(timeout_seconds: int = 60,
 
 # ----------------------------------------------------------------- recording
 def _endpoint_loop(read_chunk, max_chunks: int, chunk_ms: int = 64,
-                   silence_limit_ms: int = None, floor_min: float = 200.0,
-                   hard_speech: float = 1800.0):
+                   silence_limit_ms: int = None, floor_min: float = 110.0,
+                   hard_speech: float = 650.0):
     """State machine: pull audio chunks until the user stops talking.
 
     - Calibrates the noise floor while waiting for speech (running minimum).
@@ -210,7 +218,7 @@ def _endpoint_loop(read_chunk, max_chunks: int, chunk_ms: int = 64,
     config = get_config()
     silence_limit = max(1, int((silence_limit_ms or config.silence_end_ms) / chunk_ms))
     pre_roll = deque(maxlen=max(1, int(config.pre_speech_buffer_ms / chunk_ms)))
-    min_speech_chunks = max(1, int(500 / chunk_ms))  # real speech lasts >= 0.5 s
+    min_speech_chunks = max(1, int(320 / chunk_ms))  # allow short commands without accepting single clicks
 
     out: list = []
     pre_roll.clear()
@@ -285,17 +293,20 @@ def record_audio(seconds: int = None) -> Path | None:
             logger.info("record_audio: no speech detected")
             return None
         audio = np.concatenate(chunks)
-        # Unique name prevents simultaneous GUI/graph recordings from overwriting
-        # one another when two turns start in the same second.
-        with tempfile.NamedTemporaryFile(prefix="merlin_mic_", suffix=".wav",
-                                         delete=False) as handle:
-            tmp = Path(handle.name)
+        tmp = Path(tempfile.gettempdir()) / f"merlin_mic_{time.time_ns()}.wav"
         with wave.open(str(tmp), "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(_SAMPLE_RATE)
             wf.writeframes(audio.tobytes())
-        logger.info("record_audio: %.1f s of speech captured", len(audio) / _SAMPLE_RATE)
+        if os.environ.get("MERLIN_STT_DEBUG_AUDIO", "0") == "1":
+            debug_dir = Path.home() / "merlin" / "debug_audio"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            import shutil
+            debug_path = debug_dir / tmp.name
+            shutil.copy2(tmp, debug_path)
+            logger.info("STT debug audio saved to %s (contains private audio)", debug_path)
+        logger.info("record_audio: %.1f s captured", len(audio) / _SAMPLE_RATE)
         return tmp
     except Exception as exc:
         logger.exception("record_audio failed")
@@ -321,13 +332,14 @@ def _run_whisper(model, audio, language: str | None):
         audio, language=language, task="transcribe",
         initial_prompt=_STT_HINT,
         beam_size=5,
-        temperature=0.0,                    # deterministic decoding
+        best_of=5,
+        temperature=0.0,                    # no fallback to random sampling
         condition_on_previous_text=False,   # one utterance: no drifting context
-        vad_filter=True,                    # suppress background/no-speech segments
-        vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 180},
-        no_speech_threshold=0.55,
+        vad_filter=True,                    # ignore everything that is not speech
+        vad_parameters={"min_silence_duration_ms": 650, "speech_pad_ms": 250},
+        no_speech_threshold=0.6,
         log_prob_threshold=-1.0,
-        compression_ratio_threshold=2.2,
+        compression_ratio_threshold=2.4,
     )
     kept = []
     for seg in segments:  # decoding happens while iterating
@@ -350,8 +362,8 @@ def _is_noise(text: str) -> bool:
 def transcribe_audio_stt(audio_path: str) -> dict:
     """Transcribe speech with faster-whisper.
 
-    Spanish is forced by default to avoid short Spanish commands being classified
-    as English. Set MERLIN_STT_LANGUAGE=auto for bilingual auto-detection or =en
+    Spanish is the default because MERLIN's primary interaction language is
+    Spanish. Set MERLIN_STT_LANGUAGE=auto for bilingual auto-detection or =en
     for English-only use. Returns text, language, and language_probability.
     """
     try:
@@ -361,15 +373,6 @@ def transcribe_audio_stt(audio_path: str) -> dict:
         with wave.open(str(audio_path), "rb") as wf:
             frames = wf.readframes(wf.getnframes())
         audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-        if audio.size == 0:
-            return {"ok": False, "error": "La grabación está vacía; repite la instrucción."}
-        # Gently normalize quiet microphone input. Do not amplify near-silence,
-        # which would magnify room noise and make Whisper hallucinate words.
-        peak = float(np.max(np.abs(audio)))
-        rms = float(np.sqrt(np.mean(np.square(audio))))
-        if peak >= 0.008 and rms >= 0.002:
-            gain = min(4.0, 0.12 / max(rms, 1e-6))
-            audio = np.clip(audio * gain, -0.98, 0.98)
 
         forced = os.environ.get("MERLIN_STT_LANGUAGE", "es").strip().lower()
         if forced not in ("es", "en", "auto", ""):
@@ -398,8 +401,8 @@ def transcribe_audio_stt(audio_path: str) -> dict:
 
         language = getattr(info, "language", None)
         probability = float(getattr(info, "language_probability", 0.0) or 0.0)
-        logger.info("STT result: language=%s probability=%.2f text=%r",
-                    language, probability, text)
+        logger.info("STT result: language=%s probability=%.2f chars=%d text=%r",
+                    language, probability, len(text), text)
         return {"ok": True, "text": text, "language": language,
                 "language_probability": probability}
     except ImportError:

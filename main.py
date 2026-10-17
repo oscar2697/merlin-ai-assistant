@@ -3,7 +3,7 @@
 Usage:
   python main.py                -> GUI mode (default)
   python main.py --cli          -> terminal chat mode
-  python main.py --check        -> Ollama connectivity check
+  python main.py --check        -> Ollama connectivity/model check
   python main.py --install-autostart  -> register Windows autostart tasks
 """
 from __future__ import annotations
@@ -13,8 +13,9 @@ import logging
 import sys
 
 from merlin.config import ensure_dirs, get_config
-from merlin.events import next_event
+from merlin.events import drain_events, next_event
 from merlin.llm import get_llm
+from merlin.runtime import MerlinRuntime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,13 +27,11 @@ def run_check() -> int:
     llm = get_llm()
     model = llm.detect_model()
     if model:
-        print(f"Ollama OK - serving: {model}")
+        print(f"Ollama OK - modelo disponible: {model}")
         return 0
-    print(
-        "Ollama unavailable or configured model not installed. "
-        f"Check Ollama at {get_config().ollama_base_url} and run "
-        f"ollama pull {get_config().model_name} if needed."
-    )
+    print("Ollama no está disponible o el modelo configurado no está instalado. "
+          f"Comprueba el servidor en {get_config().lm_studio_base_url} y "
+          f"que exista el modelo '{get_config().model_name}' (ollama list).")
     return 1
 
 
@@ -54,13 +53,11 @@ def install_autostart() -> int:
     if result.returncode != 0:
         print(result.stderr)
         return 1
-    print("Autostart task registered for MERLIN; Ollama must start separately.")
+    print("Autostart tasks registered (MERLIN at logon).")
     return 0
 
 
 def run_cli() -> None:
-    from merlin.runtime import MerlinRuntime
-
     runtime = MerlinRuntime()
     print("MERLIN CLI mode. Type your request ('exit' to quit).")
     while True:
@@ -80,7 +77,6 @@ def run_cli() -> None:
 
 
 def run_gui() -> None:
-    from merlin.runtime import MerlinRuntime
     from merlin.gui import run_gui as launch
     from merlin.greeting import greet_async
     runtime = MerlinRuntime()
@@ -92,7 +88,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="MERLIN local AI assistant")
     parser.add_argument("--cli", action="store_true", help="terminal chat mode")
     parser.add_argument("--check", action="store_true",
-                        help="verify Ollama connectivity and model availability, then exit")
+                        help="verify LM Studio connectivity and exit")
     parser.add_argument("--install-autostart", action="store_true",
                         help="register autostart tasks (Windows)")
     args = parser.parse_args()
@@ -105,7 +101,7 @@ def main() -> int:
         return install_autostart()
 
     if not get_llm().health_check():
-        logger.warning("Starting in DEGRADED MODE: Ollama is not reachable or the model is missing. "
+        logger.warning("Starting in DEGRADED MODE: Ollama/model is not reachable. "
                        "Deterministic fallbacks are active.")
 
     try:

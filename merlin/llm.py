@@ -25,17 +25,21 @@ class LLMConnector:
         self.available: Optional[bool] = None
         self._detected_model: Optional[str] = None
         
-        # Accept a legacy /v1 suffix, but Ollama itself uses its native API.
-        base = self.config.ollama_base_url.rstrip("/")
+        # FIX: normaliza la URL - quita /v1 si viene del .env heredado de LM Studio
+        base = self.config.lm_studio_base_url.rstrip("/")
         if base.endswith("/v1"):
             base = base[:-3]
         self._base = base
 
-    def detect_model(self) -> str | None:
-        """Return the configured Ollama model when its tag is available."""
-        if self.available is None:
-            self.health_check()
-        return self._detected_model if self.available else None
+    def detect_model(self) -> Optional[str]:
+        """Devuelve el nombre del modelo configurado si Ollama lo tiene instalado.
+
+        Mantiene compatibilidad con el comando `python main.py --check`.
+        No sustituye silenciosamente el modelo configurado por otro.
+        """
+        if not self.health_check():
+            return None
+        return self._detected_model or self.model_name
 
     def health_check(self) -> bool:
         """Verifica si Ollama está disponible y detecta el modelo configurado."""
@@ -52,14 +56,17 @@ class LLMConnector:
             # 1. Buscar el modelo exacto que pedimos en el config
             target = self.model_name
             for name in available_models:
-                if target == name:
+                if target == name or target in name or name.startswith(target + ":"):
                     self._detected_model = name
                     self.available = True
                     logger.info("Ollama OK - serving: %s (configurado: %s)",
                             self._detected_model, target)
                     return True
             
-            # Never silently substitute a different model.
+            # Do not silently substitute another model family. A successful
+            # health check must mean the configured model is actually installed.
+            # This avoids unexpected behavior and makes setup errors diagnosable.
+            # 2. Ningún modelo configurado disponible
             logger.warning("Modelo '%s' no está en Ollama. Disponibles: %s",
                         target, available_models)
             logger.info("Descárgalo con: ollama pull %s", target)
@@ -74,8 +81,8 @@ class LLMConnector:
     def chat(self, messages: List[Dict[str, str]], fallback: str = "",
              on_token=None) -> str:
         """Envía mensajes a Ollama con parámetros optimizados."""
-        if self.available is not True and not self.health_check():
-            logger.warning("LLM offline or model missing - using fallback")
+        if self.available is None and not self.health_check():
+            logger.warning("LLM offline - using fallback")
             return fallback
 
         payload = {

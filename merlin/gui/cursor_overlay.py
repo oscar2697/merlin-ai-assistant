@@ -239,18 +239,8 @@ def _current_agent_position_locked(now: float | None = None):
             start[1] + (_agent_target[1] - start[1]) * eased)
 
 
-def _natural_move_duration(start, target, requested: float) -> float:
-    """Scale long traversals so the agent glides instead of teleporting."""
-    requested = max(0.0, min(float(requested), 4.0))
-    distance = math.hypot(target[0] - start[0], target[1] - start[1])
-    if distance < 2 or requested == 0:
-        return requested
-    # About 1.2 s across a 1600 px desktop, but keep small UI moves snappy.
-    return min(1.25, max(requested, distance / 1350.0))
-
-
-def move_agent_to(x: float, y: float, duration: float = 0.25, *, enqueue: bool = True) -> float:
-    """Animate MERLIN's pointer and return the effective, distance-aware duration."""
+def move_agent_to(x: float, y: float, duration: float = 0.25, *, enqueue: bool = True) -> None:
+    """Animate MERLIN's visual pointer. Queues destinations so rapid actions aren't skipped."""
     global _agent_pos, _agent_target, _agent_move_from, _agent_move_started, _agent_move_duration, _cursor_engaged
     _cursor_engaged = True
     target = (float(x), float(y))
@@ -261,13 +251,10 @@ def move_agent_to(x: float, y: float, duration: float = 0.25, *, enqueue: bool =
         moving = (_agent_target is not None and _agent_move_duration > 0
                   and now - _agent_move_started < _agent_move_duration)
         if moving and enqueue:
-            start = _move_queue[-1][:2] if _move_queue else (_agent_target or current)
-            duration = _natural_move_duration(start, target, duration)
             _move_queue.append((target[0], target[1], duration))
         else:
             if not enqueue:
                 _move_queue.clear()
-            duration = _natural_move_duration(current, target, duration)
             _agent_pos = (float(current[0]), float(current[1]))
             _agent_move_from = _agent_pos
             _agent_target = target
@@ -277,7 +264,6 @@ def move_agent_to(x: float, y: float, duration: float = 0.25, *, enqueue: bool =
                 _agent_pos = target
     _ui_events.put(("move", target[0], target[1], duration))
     pulse(max(1.0, duration + 0.8))
-    return duration
 
 
 def _screen_size() -> tuple[int, int]:
@@ -365,9 +351,9 @@ def task_step(message: str, target: tuple[float, float] | None = None,
         narrate(msg, duration=2.8)
     if target is not None:
         x, y = float(target[0]), float(target[1])
-        effective_duration = move_agent_to(x, y, duration=duration)
-        if effective_duration > 0:
-            time.sleep(min(effective_duration, 1.25))
+        move_agent_to(x, y, duration=duration)
+        if duration > 0:
+            time.sleep(min(duration, 1.0))
         if click:
             _pings.put((x, y))
             pulse(0.8, click=True)
@@ -594,8 +580,8 @@ def _patch_pyautogui() -> None:
             if name in ("click", "leftClick", "rightClick", "middleClick", "doubleClick", "tripleClick"):
                 pulse(1.4, click=False)
                 if point is not None:
-                    travel = move_agent_to(point[0], point[1], duration=0.18, enqueue=False)
-                    time.sleep(min(travel, 1.25))
+                    move_agent_to(point[0], point[1], duration=0.18, enqueue=False)
+                    time.sleep(0.19)
                 # Explicit coordinates are kept intact; for click() with no target,
                 # resolve to MERLIN's logical position rather than the avatar origin.
                 if explicit_point is None and point is not None:
@@ -617,8 +603,8 @@ def _patch_pyautogui() -> None:
 
             if name == "mouseDown":
                 if point is not None:
-                    travel = move_agent_to(point[0], point[1], duration=0.16, enqueue=False)
-                    time.sleep(min(travel, 1.25))
+                    move_agent_to(point[0], point[1], duration=0.16, enqueue=False)
+                    time.sleep(0.17)
                 if not _native_drag_active:
                     # Keep the native pointer hidden until mouseUp so a drag is real.
                     global _native_saved_pos, _native_hidden
