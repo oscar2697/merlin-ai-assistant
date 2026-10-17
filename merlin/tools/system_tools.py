@@ -232,6 +232,47 @@ def _find_start_app(app_name: str) -> dict | None:
     return None
 
 
+_APP_ALIASES = {
+    "itunes": ("iTunes", "Apple iTunes"),
+    "word": ("Word", "Microsoft Word"),
+    "microsoft word": ("Word", "Microsoft Word"),
+    "excel": ("Excel", "Microsoft Excel"),
+    "powerpoint": ("PowerPoint", "Microsoft PowerPoint"),
+    "bloc de notas": ("Notepad", "Bloc de notas"),
+    "notepad": ("Notepad", "Bloc de notas"),
+    "spotify": ("Spotify",),
+    "chrome": ("Google Chrome", "Chrome"),
+    "whatsapp": ("WhatsApp",),
+}
+
+
+def _app_candidates(app_name: str) -> tuple[str, ...]:
+    cleaned = (app_name or "").strip().lower().replace(".exe", "")
+    aliases = _APP_ALIASES.get(cleaned, ())
+    return tuple(dict.fromkeys((app_name.strip(), *aliases))) if app_name.strip() else ()
+
+
+def _direct_app_path(app_name: str) -> Path | None:
+    """Known desktop-app paths; avoids relying only on Start-menu labels."""
+    if sys.platform != "win32":
+        return None
+    key = (app_name or "").strip().lower().replace(".exe", "")
+    roots = [Path(os.environ.get("PROGRAMFILES", "C:/Program Files")),
+             Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")),
+             Path(os.environ.get("LOCALAPPDATA", ""))]
+    candidates = []
+    if key in ("itunes", "apple itunes"):
+        candidates += [r / "iTunes" / "iTunes.exe" for r in roots[:2]]
+    elif key in ("word", "microsoft word"):
+        candidates += [r / "Microsoft Office" / "root" / "Office16" / "WINWORD.EXE" for r in roots[:2]]
+        candidates += [r / "Microsoft Office" / "Office16" / "WINWORD.EXE" for r in roots[:2]]
+    elif key in ("excel", "microsoft excel"):
+        candidates += [r / "Microsoft Office" / "root" / "Office16" / "EXCEL.EXE" for r in roots[:2]]
+    elif key in ("powerpoint", "microsoft powerpoint"):
+        candidates += [r / "Microsoft Office" / "root" / "Office16" / "POWERPNT.EXE" for r in roots[:2]]
+    return next((p for p in candidates if p.exists()), None)
+
+
 def _open_app_impl(app_name: str) -> dict:
     """Launch an installed application through the platform launcher."""
     app_name = (app_name or "").strip()
@@ -239,23 +280,31 @@ def _open_app_impl(app_name: str) -> dict:
         return {"ok": False, "error": "No application name provided."}
     try:
         if sys.platform == "win32":
-            # 0) Chrome: launch the exe with a profile so no profile picker shows
-            if "chrome" in app_name.lower() and _launch_chrome():
+            candidates = _app_candidates(app_name)
+            # Chrome: launch with configured profile, not the profile picker.
+            if any("chrome" in c.lower() for c in candidates) and _launch_chrome():
                 return {"ok": True, "app": "Google Chrome", "method": "chrome profile",
                         "profile": CHROME_PROFILE}
-            # 1) Start-menu apps by AppID: covers Microsoft Store apps (WhatsApp...)
-            app = _find_start_app(app_name)
-            if app and app.get("AppID"):
-                # explorer.exe returns exit code 1 even on success: don't check it
-                subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app['AppID']}"])
-                return {"ok": True, "app": app.get("Name", app_name),
-                        "method": "start apps"}
-            # 2) Fuzzy match a Start Menu shortcut
-            hit = _find_start_menu_shortcut(app_name)
-            if hit:
-                subprocess.Popen(f'cmd /c start "" "{hit}"', shell=True)
-                return {"ok": True, "app": app_name, "method": "start menu",
-                        "shortcut": str(hit)}
+            # Known desktop executables are more reliable than fuzzy Start-menu search.
+            direct = _direct_app_path(app_name)
+            if direct:
+                subprocess.Popen([str(direct)])
+                return {"ok": True, "app": direct.stem, "method": "known executable",
+                        "path": str(direct)}
+            # Start-menu apps, trying canonical names and aliases.
+            for candidate in candidates:
+                app = _find_start_app(candidate)
+                if app and app.get("AppID"):
+                    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app['AppID']}"])
+                    return {"ok": True, "app": app.get("Name", candidate),
+                            "method": "start apps"}
+            # Fuzzy shortcut match; try aliases before the spoken spelling.
+            for candidate in candidates:
+                hit = _find_start_menu_shortcut(candidate)
+                if hit:
+                    subprocess.Popen(f'cmd /c start "" "{hit}"', shell=True)
+                    return {"ok": True, "app": candidate, "method": "start menu",
+                            "shortcut": str(hit)}
             # 3) Last resort: shell 'start' (App Paths registry, URLs)
             res = subprocess.run(
                 f'start "" "{app_name}"', shell=True, capture_output=True, text=True)

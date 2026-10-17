@@ -49,7 +49,7 @@ def _generate_text(instruction: str) -> str:
     return text.strip()
 
 
-def _write_text(app_name: str = "", instruction: str = "", text: str = "") -> dict:
+def _write_text(app_name: str = "", instruction: str = "", text: str = "", create_new_document: bool = False) -> dict:
     """Write `text` (or text generated for `instruction`) into an app window."""
     text = (text or "").strip()
     if not text:
@@ -59,7 +59,7 @@ def _write_text(app_name: str = "", instruction: str = "", text: str = "") -> di
         if not text:
             return {"ok": False,
                     "error": "I could not generate the text (is the LLM running?)."}
-    return writing_tools.type_into_app(app_name, text)
+    return writing_tools.type_into_app(app_name, text, create_new_document=create_new_document)
 
 
 _OS_TOOLS = {
@@ -289,10 +289,25 @@ def _write_plan(query: str) -> dict | None:
         if re.search(rf"\b{re.escape(key)}\b", q):
             app = title
             break
-    if not app and not _WRITE_NOUN_RE.search(q):
+    has_writing_subject = bool(_WRITE_NOUN_RE.search(q) or re.search(
+        r"\b(?:sobre|acerca de|about|on)\b", q, re.IGNORECASE))
+    if not app and not has_writing_subject:
         return None
+    # If the user asks MERLIN to write without naming an app, use Word rather
+    # than accidentally pasting into the last foreground window (possibly MERLIN).
+    if not app and has_writing_subject:
+        app = "Word"
     instruction = query[verb.start():].strip(" ?.,!¿¡")
-    return {"tool": "write_text", "app_name": app, "instruction": instruction}
+    # Natural one-shot request: open Word and begin writing -> create a fresh document.
+    document_app = app in ("Word", "PowerPoint", "Excel", "OneNote")
+    continuing = bool(re.search(
+        r"\b(?:contin[uú]a|sigue|continua|continue|keep writing|en este documento|"
+        r"en el documento abierto|en este archivo|append)\b", q, re.IGNORECASE))
+    # A writing request normally means a fresh document; the user shouldn't have
+    # to separately say "open Word" and then repeat the writing request.
+    create_new = document_app and not continuing
+    return {"tool": "write_text", "app_name": app, "instruction": instruction,
+            "create_new_document": create_new}
 
 
 def _search_plan(q: str) -> dict | None:
@@ -745,9 +760,14 @@ def _summarize(tool: str, result: dict, language: str) -> str:
         return f"Abriendo {app}." if es else f"Opening {app}."
     if tool == "write_text":
         where = result.get("app") or result.get("window") or ""
+        verified = result.get("verified")
         if es:
-            return f"Listo, escribí el texto en {where}." if where else "Listo, escribí el texto."
-        return f"Done, I wrote the text in {where}." if where else "Done, I wrote the text."
+            if verified:
+                return f"Listo: escribí y comprobé el texto en {where}." if where else "Listo: escribí y comprobé el texto."
+            return f"Inserté el texto en {where}, pero no pude verificar visualmente todo el contenido." if where else "Inserté el texto, pero no pude verificar visualmente el contenido."
+        if verified:
+            return f"Done: I wrote and verified the text in {where}." if where else "Done: I wrote and verified the text."
+        return f"I inserted the text in {where}, but could not verify its full contents." if where else "I inserted the text, but could not verify its full contents."
     if tool == "search_web":
         q = result.get("query")
         return (f"Abrí la búsqueda de «{q}» en Chrome." if es
