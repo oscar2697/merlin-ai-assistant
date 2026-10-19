@@ -128,7 +128,29 @@ _SEARCH_RE = re.compile(
     r"(?:\s+(?:en|in|on|con)\s+(?:google\s+chrome|google|chrome|internet|la\s+web|the\s+web))?\s*$")
 
 # "escribe/describe un párrafo sobre X (en Word)" -> write_text
-_WRITE_VERB_RE = re.compile(r"\b(?:escrib\w+|redact\w+|describ\w+|write|draft|compose)\b")
+_WRITE_VERB_RE = re.compile(
+    r"\b(?:escribe|escriba|escrib[ií]|escribir|escriban|escribid|escr[ií]beme|"
+    r"redacta|redact[eé]|redactar|redacten|redactad|red[aá]ctame|"
+    r"describe|describa|describ[ií]|describir|describan|describid|"
+    r"write|writes|draft|drafts|compose|composes|"
+    r"crea|cre[aá]|crear|cree|creen|cread|crearme|"
+    r"genera|gener[aá]|generar|genere|generen|generad|gen[eé]rame|"
+    r"haz(?:me)?|hacer|haga|hagan|"
+    r"elabora|elabor[aá]|elaborar|elabore|elaboren|"
+    r"prepara|prepar[aá]|preparar|prepare|preparen|"
+    r"produce|producir|produzca|produzcan)\b",
+    re.IGNORECASE)
+_WRITE_ACTION_RE = re.compile(
+    r"\b(?:escribe|escriba|escrib[ií]|escribir|escriban|escribid|escr[ií]beme|"
+    r"redacta|redact[eé]|redactar|redacten|redactad|red[aá]ctame|"
+    r"describe|describa|describ[ií]|describir|describan|describid|"
+    r"write|writes|draft|drafts|compose|composes|"
+    r"haz(?:me)?|hacer|haga|hagan|crea|cre[aá]|crear|cree|creen|cread|"
+    r"genera|gener[aá]|generar|genere|generen|generad|"
+    r"elabora|elabor[aá]|elaborar|elabore|elaboren|"
+    r"prepara|prepar[aá]|preparar|prepare|preparen|"
+    r"produce|producir|produzca|produzcan)\b",
+    re.IGNORECASE)
 _WRITE_NOUN_RE = re.compile(
     r"\b(?:p[aá]rrafo|paragraph|texto|text|resumen|summary|ensayo|essay|carta|letter|"
     r"poema|poem|correo|email|art[ií]culo|article|historia|story)\b")
@@ -281,9 +303,14 @@ def _call_plan(query: str) -> dict | None:
 def _write_plan(query: str) -> dict | None:
     """'...puedes describir un párrafo sobre las redes' (+ Word) -> write_text."""
     q = query.lower()
-    verb = _WRITE_VERB_RE.search(q)
-    if not verb:
+    verbs = list(_WRITE_VERB_RE.finditer(query))
+    if not verbs:
         return None
+    # Prefer the actual writing action over a preceding "create a document"
+    # clause, e.g. "create a new document and write an essay about relativity".
+    verb = next((m for m in verbs if _WRITE_ACTION_RE.fullmatch(m.group(0))), None)
+    if verb is None:
+        return None  # descriptive forms such as "está escribiendo" are not commands
     app = ""
     for key, title in _WRITE_APPS:
         if re.search(rf"\b{re.escape(key)}\b", q):
@@ -521,10 +548,14 @@ def _fast_steps(query: str) -> list | None:
     linkedin = _linkedin_plan(q)  # the post instruction may contain "y"/"and"
     if linkedin and not _STEP_SPLIT.search(q):
         return [linkedin]  # "y"-chains fall through and split: capture + post
-    if not re.search(r"\b(?:abre|abrir|open|launch)\b", q):
-        writing = _write_plan(query)  # the text to write may contain "y"/"and"
-        if writing:
-            return [writing]
+    # Treat compound "open Word + create/write content" as one writing
+    # workflow. The writing tool can launch/focus Word, create the document,
+    # insert generated text and verify it. Splitting this request previously
+    # let the LLM choose only open_app.
+    writing = _write_plan(query)
+    if writing:
+        return [writing]
+
     single = _search_plan(q)  # a search topic may contain "y"/"and": don't split it
     if single:
         return [single]
@@ -685,7 +716,7 @@ def os_agent_node(state: GraphState) -> dict:
         logger.info("OS step: %s %s -> %s", tool_name, args,
                     {k: v for k, v in result.items()
                      if k in ("ok", "method", "error", "window", "chars", "sent",
-                              "clicked", "cursor")})
+                              "clicked", "cursor", "verified", "pasted_attempted")})
         calls.append({"tool": tool_name, "args": args})
         results.append(result)
         summaries.append(_summarize(tool_name, result, language))

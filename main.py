@@ -30,7 +30,7 @@ def run_check() -> int:
         print(f"Ollama OK - modelo disponible: {model}")
         return 0
     print("Ollama no está disponible o el modelo configurado no está instalado. "
-          f"Comprueba el servidor en {get_config().lm_studio_base_url} y "
+          f"Comprueba el servidor de Ollama en {get_config().lm_studio_base_url} y "
           f"que exista el modelo '{get_config().model_name}' (ollama list).")
     return 1
 
@@ -88,7 +88,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="MERLIN local AI assistant")
     parser.add_argument("--cli", action="store_true", help="terminal chat mode")
     parser.add_argument("--check", action="store_true",
-                        help="verify LM Studio connectivity and exit")
+                        help="verify Ollama connectivity and model availability, then exit")
     parser.add_argument("--install-autostart", action="store_true",
                         help="register autostart tasks (Windows)")
     args = parser.parse_args()

@@ -50,10 +50,22 @@ def voice_listener_node(state: GraphState) -> dict:
         logger.debug("Could not remove temporary microphone recording", exc_info=True)
     if not result.get("ok"):
         logger.warning("Voice transcription failed: %s", result.get("error", "unknown"))
+        if result.get("uncertain"):
+            updates["final_response"] = result["error"]
+            updates["detected_language"] = "es"
+            return updates
         return append_to(state, "error_logs",
                          f"STT failed: {result.get('error', 'unknown')}")
 
     query = result.get("text", "")
+    language_change = voice_tools.language_command(query)
+    if language_change:
+        updates["detected_language"] = language_change
+        updates["final_response"] = (
+            "De acuerdo, reconoceré inglés hasta que me pidas volver al español."
+            if language_change == "en" else
+            "De acuerdo, volveré a reconocer español.")
+        return updates
     post_event("user_input", query)
     updates["input_query"] = query
     updates["detected_language"] = result.get("language") or detect_language(query)
