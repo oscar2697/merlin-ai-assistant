@@ -43,6 +43,7 @@ _WHISPER_LOCK = threading.Lock()
 _PIPER_CACHE: dict = {}   # loaded Piper voices, keyed by model path
 _WAKE_MODEL = None        # openWakeWord model, loaded once and reused
 _WHISPER_MODEL = None     # faster-whisper model, loaded once and reused
+_STT_LANGUAGE_OVERRIDE: str | None = None
 
 # Custom openWakeWord .onnx models (e.g. merlin.onnx) are used instead of the
 # pre-trained ones when present.
@@ -342,11 +343,18 @@ def _run_whisper(model, audio, language: str | None):
         compression_ratio_threshold=2.4,
     )
     kept = []
+    confidences = []
     for seg in segments:  # decoding happens while iterating
         if seg.no_speech_prob > 0.6 and seg.avg_logprob < -1.0:
             continue  # Whisper itself says this is silence/noise
         kept.append(seg.text.strip())
-    return " ".join(t for t in kept if t).strip(), info
+        if seg.text.strip():
+            # avg_logprob is negative; exp() maps it to an intuitive 0..1
+            # segment score without adding another model or dependency.
+            import math
+            confidences.append(math.exp(min(0.0, float(seg.avg_logprob))))
+    confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return " ".join(t for t in kept if t).strip(), info, confidence
 
 
 def _is_noise(text: str) -> bool:
@@ -357,6 +365,71 @@ def _is_noise(text: str) -> bool:
         return True
     tokens = re.findall(r"\w+", text.lower())
     return len(tokens) >= 3 and all(t in _HINT_TOKENS for t in tokens)
+
+
+def _is_incoherent(text: str) -> bool:
+    """Catch a common Spanish/English decoding artifact before it can act."""
+    low = (text or "").lower()
+    # Whisper sometimes combines the copula with a Spanish gerund
+    # ("es escribiendo"), a strong sign that the recognized words drifted.
+    return bool(re.search(
+        r"\b(?:es|est[aá])\s+(?:escribiendo|redactando|describiendo|"
+        r"generando|preparando|elaborando)\b", low))
+
+
+def _language_mode() -> str:
+    """Return the explicitly configured STT language; Spanish is the default."""
+    if _STT_LANGUAGE_OVERRIDE in ("es", "en"):
+        return _STT_LANGUAGE_OVERRIDE
+    value = os.environ.get("MERLIN_STT_LANGUAGE", "es").strip().lower()
+    return value if value in ("es", "en", "auto") else "es"
+
+
+def set_stt_language(language: str) -> None:
+    """Set the in-session language after an explicit spoken language command."""
+    global _STT_LANGUAGE_OVERRIDE
+    if language in ("es", "en"):
+        _STT_LANGUAGE_OVERRIDE = language
+
+
+def language_command(text: str) -> str | None:
+    """Recognize an explicit request to use English or return to Spanish."""
+    low = (text or "").lower()
+    if re.search(r"\b(?:switch|change|cambia|cambiar|cámbiame)\b.{0,24}\b(?:to\s+)?(?:english|ingl[eé]s)\b", low):
+        set_stt_language("en")
+        return "en"
+    if re.search(r"\b(?:switch|change|cambia|cambiar|cámbiame)\b.{0,24}\b(?:to\s+)?(?:spanish|espa[nñ]ol)\b", low):
+        set_stt_language("es")
+        return "es"
+    return None
+
+
+def _select_transcription(model, audio, mode: str):
+    """Decode one explicit language, or compare auto and Spanish candidates.
+
+    In auto mode Spanish wins close scores, reflecting MERLIN's primary
+    language while still allowing English when its decoding is clearly better.
+    """
+    if mode in ("es", "en"):
+        return _run_whisper(model, audio, mode)
+
+    first = _run_whisper(model, audio, None)
+    text, info, confidence = first
+    detected = getattr(info, "language", None)
+    probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+    if detected == "es" and probability >= 0.55 and confidence >= 0.35:
+        return first
+    if detected == "en" and probability >= 0.75 and confidence >= 0.60:
+        # A confident English utterance is probably an intentional language
+        # switch; don't spend another full CPU decode forcing it to Spanish.
+        return first
+
+    spanish = _run_whisper(model, audio, "es")
+    # Compare acoustic decoder confidence. Favor Spanish on close scores;
+    # retain a clearly stronger English auto result.
+    if spanish[0] and (not text or spanish[2] >= confidence - 0.08):
+        return spanish
+    return first
 
 
 def transcribe_audio_stt(audio_path: str) -> dict:
@@ -374,37 +447,29 @@ def transcribe_audio_stt(audio_path: str) -> dict:
             frames = wf.readframes(wf.getnframes())
         audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
 
-        forced = os.environ.get("MERLIN_STT_LANGUAGE", "es").strip().lower()
-        if forced not in ("es", "en", "auto", ""):
-            logger.warning("Unsupported MERLIN_STT_LANGUAGE=%r; using Spanish", forced)
-            forced = "es"
-
-        if forced in ("es", "en"):
-            # Avoid Whisper mistaking short Spanish commands for English.
-            text, info = _run_whisper(model, audio, forced)
-        else:
-            text, info = _run_whisper(model, audio, None)
-            detected = getattr(info, "language", None)
-            probability = float(getattr(info, "language_probability", 0.0) or 0.0)
-            if detected not in _ALLOWED_LANGS or probability < 0.65:
-                # For ambiguous short utterances, Spanish is the safer fallback.
-                logger.info("Whisper language uncertain (%s, p=%.2f); retrying Spanish",
-                            detected, probability)
-                es_text, es_info = _run_whisper(model, audio, "es")
-                if es_text:
-                    text, info = es_text, es_info
+        mode = _language_mode()
+        text, info, confidence = _select_transcription(model, audio, mode)
 
         if _is_noise(text):
             logger.info("Discarded transcript (silence/hallucination): %r", text)
-            return {"ok": False,
+            return {"ok": False, "uncertain": True,
                     "error": "No te entendí bien. Habla un poco más cerca del micrófono o repite la instrucción."}
+        if _is_incoherent(text):
+            logger.info("Rejected incoherent transcript: %r", text)
+            return {"ok": False, "uncertain": True,
+                    "error": "No reconocí una orden coherente. Repite la instrucción, por favor."}
 
         language = getattr(info, "language", None)
         probability = float(getattr(info, "language_probability", 0.0) or 0.0)
-        logger.info("STT result: language=%s probability=%.2f chars=%d text=%r",
-                    language, probability, len(text), text)
+        if confidence < 0.35 or probability < 0.20:
+            logger.info("Rejected uncertain STT: mode=%s language=%s probability=%.2f confidence=%.2f",
+                        mode, language, probability, confidence)
+            return {"ok": False, "uncertain": True,
+                    "error": "No te entendí con suficiente claridad. Repite la orden, por favor."}
+        logger.info("STT result: mode=%s language=%s probability=%.2f confidence=%.2f chars=%d text=%r",
+                    mode, language, probability, confidence, len(text), text)
         return {"ok": True, "text": text, "language": language,
-                "language_probability": probability}
+                "language_probability": probability, "confidence": confidence}
     except ImportError:
         return {"ok": False, "error": "faster-whisper not installed - STT unavailable."}
     except Exception as exc:
@@ -511,8 +576,9 @@ class SpeechQueue:
             # begin_turn(); start the turn here so their answer is spoken too.
             self.begin_turn()
         final_text = (final_text or "").strip()
-        if final_text.startswith(self._spoken.strip()) and len(final_text) > len(self._spoken):
-            remainder = final_text[len(self._spoken):].strip()
+        spoken_text = self._spoken.strip()
+        if spoken_text and final_text.startswith(spoken_text):
+            remainder = final_text[len(spoken_text):].strip()
         elif not self._spoken:
             remainder = final_text
         else:  # streamed text diverged from the final answer -> speak it all

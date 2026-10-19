@@ -54,9 +54,28 @@ _MESSAGE_INTENT = re.compile(
 # "escribe/redacta/describe ... en Word" -> write text into a desktop app.
 # Both parts are required: a bare "describe cómo funciona X" is just a question.
 _WRITE_VERB = re.compile(
-    r"\b(?:escrib\w+|redact\w+|describ\w+|write|draft|compose)\b", re.IGNORECASE)
+    r"\b(?:escribe|escriba|escrib[ií]|escribir|escriban|escribid|escr[ií]beme|"
+    r"redacta|redact[eé]|redactar|redacten|redactad|red[aá]ctame|"
+    r"describe|describa|describ[ií]|describir|describan|describid|"
+    r"write|writes|draft|drafts|compose|composes|"
+    r"crea|cre[aá]|crear|cree|creen|cread|crearme|"
+    r"genera|gener[aá]|generar|genere|generen|generad|gen[eé]rame|"
+    r"elabora|elabor[aá]|elaborar|elabore|elaboren|"
+    r"prepara|prepar[aá]|preparar|prepare|preparen|haz(?:me)?|hacer|haga|hagan)\b",
+    re.IGNORECASE)
 _WRITE_APP = re.compile(
     r"\b(?:word|wordpad|bloc\s+de\s+notas|notepad|onenote|outlook|excel|powerpoint)\b",
+    re.IGNORECASE)
+_WRITE_REQUEST = re.compile(
+    r"\b(?:escribe|escriba|escrib[ií]|escribir|escriban|escribid|escr[ií]beme|"
+    r"redacta|redact[eé]|redactar|redacten|redactad|red[aá]ctame|"
+    r"write|writes|draft|drafts|compose|composes|"
+    r"crea|cre[aá]|crear|cree|creen|cread|crearme|"
+    r"genera|gener[aá]|generar|genere|generen|generad|gen[eé]rame|"
+    r"elabora|elabor[aá]|elaborar|elabore|elaboren|"
+    r"prepara|prepar[aá]|preparar|prepare|preparen|haz(?:me)?|hacer|haga|hagan)\b.{0,100}\b(?:p[aá]rrafo|"
+    r"texto|resumen|ensayo|carta|poema|correo|art[ií]culo|historia|"
+    r"paragraph|text|summary|essay|letter|poem|email|article|story)\b",
     re.IGNORECASE)
 
 # "busca ... / search ..." goes to the web agent, unless the request is really
@@ -105,7 +124,8 @@ def route_query(query: str) -> str:
     if _MESSAGE_INTENT.search(q):
         logger.info("Router: message intent -> %s", ROUTE_OS)
         return ROUTE_OS
-    if _WRITE_VERB.search(q) and _WRITE_APP.search(q):
+    if ((_WRITE_VERB.search(q) and _WRITE_APP.search(q))
+            or _WRITE_REQUEST.search(q)):
         logger.info("Router: write-into-app intent -> %s", ROUTE_OS)
         return ROUTE_OS
     if _SEARCH_INTENT.search(q) and not _NOT_WEB_NOUNS.search(q):

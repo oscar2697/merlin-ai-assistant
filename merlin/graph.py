@@ -25,7 +25,9 @@ from merlin.state import GraphState
 
 
 def _after_listener(state: GraphState) -> str:
-    return "router" if state.get("input_query") else END
+    if state.get("input_query"):
+        return "router"
+    return "tts_responder" if state.get("final_response") else END
 
 
 def _after_router(state: GraphState) -> str:
@@ -50,7 +52,8 @@ def build_graph():
     graph.set_entry_point("voice_listener")
 
     graph.add_conditional_edges(
-        "voice_listener", _after_listener, {"router": "router", END: END})
+        "voice_listener", _after_listener,
+        {"router": "router", "tts_responder": "tts_responder", END: END})
 
     graph.add_conditional_edges(
         "router", _after_router,
