@@ -58,8 +58,10 @@ def test_word_home_selects_blank_template_before_pasting():
          patch.object(writing_tools, "_write_word_com", return_value=None), \
          patch.object(writing_tools, "focus_window",
                       return_value={"ok": True, "window": "Word"}), \
+         patch.object(writing_tools, "_wait_for_template_gallery",
+                      return_value=True), \
          patch.object(writing_tools, "_wait_for_document_window",
-                      side_effect=[None, fake_focus]), \
+                      return_value=fake_focus), \
          patch.object(writing_tools, "_clipboard_get",
                       side_effect=["old clipboard", text]), \
          patch.object(writing_tools, "_clipboard_set"):

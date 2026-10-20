@@ -593,12 +593,12 @@ class SpeechQueue:
         else:
             remainder = _text_after_normalized_prefix(final_text, spoken_prefix)
             if remainder is None:
-                # Prefix matching failed: this may be a fallback response after
-                # partial streaming. Speak the final text as a fallback to ensure
-                # the user receives the complete response.
+                # Prefix matching failed, so replaying the final response could
+                # repeat content already spoken. Keep the visible final answer,
+                # but fail closed for audio rather than replaying it wholesale.
                 logger.info("Final TTS text does not match streamed prefix; "
-                            "speaking full text as fallback")
-                remainder = final_text
+                            "skipping audio remainder to avoid duplicate speech")
+                remainder = ""
         if remainder:
             self.enqueue(remainder)
         self._queue.put(None)  # drain sentinel

@@ -65,6 +65,11 @@ def main() -> None:
     assert explicit_file["file_path"] == "C:\\Users\\lindo\\Pictures\\sample.png"
     assert os_agent._social_plan("Publica una actualización en LinkedIn") is None
 
+    linkedin_voice = os_agent._linkedin_plan(
+        "Lícana en LinkedIn, la última captura de pantalla.")
+    assert linkedin_voice["image_path"] == "last"
+    assert linkedin_voice["instruction"].startswith("Comparte una actualización profesional")
+
     stage_prompt = os_agent._ask_staged_confirmation(
         {"tool": "publish_social", "platform": "facebook", "mode": "story",
          "text": "A project update"},
