@@ -25,6 +25,10 @@ def tts_responder_node(state: GraphState) -> dict:
     # speak_remainder blocks until playback drains so the mic never hears
     # MERLIN's own answer. voice_mode (headless loop) implies speaking too.
     if (state.get("voice_mode") or state.get("speak")) and response:
+        # Non-streamed agent responses have no merlin_partial events. Publish
+        # the completed text before blocking on playback so the results panel
+        # is visible as soon as speech starts, just like streamed answers.
+        post_event("merlin_partial", response)
         set_current_language(language)
         get_speech_queue().speak_remainder(response, language)
 

@@ -1,4 +1,4 @@
-"""Smoke test: runs the compiled graph offline (works with or without LM Studio).
+"""Smoke test: runs the compiled graph (requires Ollama for full responses).
 
 Run:  python scripts/smoke_test.py
 """

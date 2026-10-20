@@ -32,6 +32,7 @@ import urllib.parse
 from pathlib import Path
 
 from merlin.tools import system_tools, writing_tools
+from merlin.tools.attachments import resolve_file
 
 logger = logging.getLogger("merlin.tools.whatsapp")
 
@@ -201,8 +202,8 @@ def send_whatsapp_message(contact: str, message: str) -> dict:
     method = os.environ.get("MERLIN_WHATSAPP_METHOD", "").lower()
     found = resolve_contact(contact)
     phone = found["phone"] if found else None
-    # Search the SAVED chat name when the contacts file has one: a spoken
-    # "mamá" must open the chat saved as "mom", never a similar-looking group.
+    # Prefer the saved chat name so a spoken contact alias cannot select a
+    # similarly named group.
     search_name = found["name"] if found else contact
     if method == "search":
         return _send_via_search(search_name, message, display=contact)
@@ -329,31 +330,18 @@ def _clipboard_set_file(path: str) -> bool:
         return False
 
 
-def _latest_screenshot() -> str | None:
-    """Newest image in ~/merlin/screenshots, if any."""
-    d = Path.home() / "merlin" / "screenshots"
-    if not d.exists():
-        return None
-    files = sorted(d.glob("merlin_*.png"))
-    return str(files[-1]) if files else None
-
-
-def send_whatsapp_media(contact: str, image_path: str = "last") -> dict:
-    """Send the latest screenshot (or a given file) to a contact's chat:
-    open the chat, paste the file from the clipboard, Enter to send."""
+def send_whatsapp_media(contact: str, image_path: str = "last",
+                        file_path: str = "") -> dict:
+    """Send a local file or the latest screenshot to a WhatsApp chat."""
     contact = (contact or "").strip()
     if not contact:
         return {"ok": False, "error": "Hace falta un contacto."}
     if sys.platform != "win32":
         return {"ok": False, "error": "WhatsApp media is Windows-only for now."}
-    path = image_path
-    if not path or str(path).strip().lower() in ("last", "última", "ultima",
-                                                 "latest", "captura", "screenshot"):
-        path = _latest_screenshot()
-    if not path or not Path(path).exists():
+    path = resolve_file(file_path or image_path)
+    if path is None:
         return {"ok": False,
-                "error": "No tengo ninguna captura reciente. Pídeme que tome "
-                         "una primero."}
+                "error": "The requested file does not exist or no screenshot is available."}
     try:
         import pyautogui
     except ImportError:
@@ -368,8 +356,8 @@ def send_whatsapp_media(contact: str, image_path: str = "last") -> dict:
         res = _click_message_box()
         if not res.get("ok"):
             return res
-        if not _clipboard_set_file(path):
-            return {"ok": False, "error": "No pude copiar el archivo al portapapeles."}
+        if not _clipboard_set_file(str(path)):
+            return {"ok": False, "error": "Could not copy the file to the clipboard."}
         time.sleep(0.4)
         pyautogui.hotkey("ctrl", "v")     # paste the image into the chat
         time.sleep(2.5)                   # let WhatsApp render the preview
@@ -377,7 +365,8 @@ def send_whatsapp_media(contact: str, image_path: str = "last") -> dict:
         if sent:
             pyautogui.press("enter")     # send
             time.sleep(1.0)
-        return {"ok": True, "contact": contact, "image": str(path),
+        return {"ok": True, "contact": contact, "file": str(path),
+                "file_name": path.name,
                 "method": "clipboard paste", "sent": sent}
     except Exception as exc:
         logger.exception("send_whatsapp_media failed")

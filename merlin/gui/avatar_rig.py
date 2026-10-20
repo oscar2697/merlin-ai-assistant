@@ -1,9 +1,9 @@
-"""Avatar por capas (Pillow): parpadeo, ojos que siguen al cursor, inclinación
-al escuchar, rebote al hablar y modo dormido (se hunde tras la barra).
+"""Layered Pillow avatar: blinking, cursor tracking, listening tilt, speaking
+bounce, and a sleep state that sinks behind the taskbar.
 
-~/merlin/avatar/ : base, iris_l, iris_r, mask_l, mask_r, blink (.png, mismo lienzo)
-Todos los desplazamientos son >= 0 (hacia abajo): así nunca aparece un hueco
-entre el personaje y el borde inferior (la barra de tareas).
+~/merlin/avatar/: base, iris_l, iris_r, mask_l, mask_r, blink (.png, same canvas)
+All offsets are >= 0 (downward), so no gap appears between the character and
+the bottom edge (the taskbar).
 """
 from __future__ import annotations
 
@@ -92,12 +92,15 @@ class AvatarRig:
         self.ok = True
 
     def frame(self, now: float, look_at=None, level: float | None = None):
-        """look_at: (dx, dy) en -1..1, dirección del cursor respecto a los ojos.
-        level: 0..1 volumen de la voz (None = rebote sintético al hablar)."""
+        """Render a frame.
+
+        look_at is (dx, dy) in -1..1 relative to the eyes. level is voice
+        volume in 0..1; None uses a synthetic speaking bounce.
+        """
         st = self.state
         asleep = st == "sleep"
         if st == "thinking":
-            tx, ty = 0.7, -0.9                   # mira arriba a la derecha
+            tx, ty = 0.7, -0.9                   # look up and to the right
         elif asleep or look_at is None:
             tx = ty = 0.0
         else:
@@ -107,7 +110,7 @@ class AvatarRig:
         self._awake += ((0.0 if asleep else 1.0) - self._awake) * 0.12
         self._lean += ((-0.03 if st == "listening" else 0.0) - self._lean) * 0.15
 
-        # parpadeo: 0 = abierto, 0.5 = a medias, 1 = cerrado
+        # Blink: 0 = open, 0.5 = half-closed, 1 = closed.
         closed = 1.0 if (asleep or self._awake < 0.5) else 0.0
         if not closed:
             if self._blink_t0 is None and now >= self._next_blink:
@@ -124,13 +127,13 @@ class AvatarRig:
                     self._blink_t0 = None
                     self._next_blink = now + random.uniform(2.5, 6.0)
 
-        # desplazamiento vertical (siempre hacia abajo)
+        # Vertical displacement (always downward).
         bounce = 0.0
         if st == "speaking":
             lv = 0.6 if level is None else level
             bounce = lv * 4 * abs(math.sin(now * 14))
         breath = (1 + math.sin(now * (0.9 if asleep else 1.6))) / 2 * (1.5 if asleep else 1.0)
-        sink = (1 - self._awake) * self.size[1] * 0.06      # dormido = se hunde un poco
+        sink = (1 - self._awake) * self.size[1] * 0.06      # sink slightly when asleep
         dy = sink + breath + bounce
 
         frame = self.base.copy()
@@ -146,7 +149,7 @@ class AvatarRig:
             frame.alpha_composite(self.blink if closed >= 1 else self.blink_half)
 
         h = self.size[1]
-        # inclinación = cizalla con la base fija; + desplazamiento vertical
+        # Tilt is a shear around the fixed base, plus vertical displacement.
         return frame.transform(self.size, Image.AFFINE,
                                (1, self._lean, -self._lean * h, 0, 1, -dy),
                                Image.BICUBIC)

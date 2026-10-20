@@ -1,4 +1,4 @@
-"""Ollama API client optimizado basado en pruebas de parámetros."""
+"""Ollama API client tuned with empirically tested parameters."""
 from __future__ import annotations
 
 import json
@@ -25,35 +25,35 @@ class LLMConnector:
         self.available: Optional[bool] = None
         self._detected_model: Optional[str] = None
         
-        # FIX: normaliza la URL - quita /v1 si viene del .env heredado de LM Studio
-        base = self.config.lm_studio_base_url.rstrip("/")
+        # Accept legacy URLs copied from LM Studio's OpenAI-compatible endpoint.
+        base = self.config.ollama_base_url.rstrip("/")
         if base.endswith("/v1"):
             base = base[:-3]
         self._base = base
 
     def detect_model(self) -> Optional[str]:
-        """Devuelve el nombre del modelo configurado si Ollama lo tiene instalado.
+        """Return the configured model name when it is installed in Ollama.
 
-        Mantiene compatibilidad con el comando `python main.py --check`.
-        No sustituye silenciosamente el modelo configurado por otro.
+        Keep compatibility with `python main.py --check`.
+        Never silently replace the configured model with another model.
         """
         if not self.health_check():
             return None
         return self._detected_model or self.model_name
 
     def health_check(self) -> bool:
-        """Verifica si Ollama está disponible y detecta el modelo configurado."""
+        """Check Ollama availability and detect the configured model."""
         try:
             resp = httpx.get(f"{self._base}/api/tags", timeout=5)
             if resp.status_code != 200:
-                logger.warning("Ollama respondió HTTP %d", resp.status_code)
+                logger.warning("Ollama returned HTTP %d", resp.status_code)
                 self.available = False
                 return False
             
             data = resp.json()
             available_models = [m.get("name", "") for m in data.get("models", [])]
             
-            # 1. Buscar el modelo exacto que pedimos en el config
+            # Find the exact model configured by the user.
             target = self.model_name
             for name in available_models:
                 if target == name or target in name or name.startswith(target + ":"):
@@ -66,10 +66,9 @@ class LLMConnector:
             # Do not silently substitute another model family. A successful
             # health check must mean the configured model is actually installed.
             # This avoids unexpected behavior and makes setup errors diagnosable.
-            # 2. Ningún modelo configurado disponible
-            logger.warning("Modelo '%s' no está en Ollama. Disponibles: %s",
+            logger.warning("Model '%s' is not installed in Ollama. Available: %s",
                         target, available_models)
-            logger.info("Descárgalo con: ollama pull %s", target)
+            logger.info("Install it with: ollama pull %s", target)
             self.available = False
             return False
             
@@ -80,7 +79,7 @@ class LLMConnector:
 
     def chat(self, messages: List[Dict[str, str]], fallback: str = "",
              on_token=None) -> str:
-        """Envía mensajes a Ollama con parámetros optimizados."""
+        """Send messages to Ollama with the configured parameters."""
         if self.available is None and not self.health_check():
             logger.warning("LLM offline - using fallback")
             return fallback

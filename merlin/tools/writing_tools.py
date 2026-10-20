@@ -1,6 +1,6 @@
 """Write text into another desktop app: focus its window, paste via the clipboard.
 
-pyautogui.typewrite cannot produce accents, ñ or ¿ and types into whichever
+pyautogui.typewrite cannot produce accented characters, ñ, or ¿ and types into whichever
 window has focus. Pasting handles any Unicode text, and the window is focused
 first by its title. Windows only (pywin32).
 """
@@ -268,7 +268,10 @@ def type_into_app(app_name: str, text: str, create_new_document: bool = False) -
             time.sleep(0.45)
             # In Word, Ctrl+N from the Home screen opens the template gallery;
             # Blank document is selected by default. Confirm it with Enter.
-            document_focus = _wait_for_document_window(app_name, timeout=1.5)
+            # Office may take several seconds to populate the template gallery
+            # on a cold start. Wait for the gallery before pressing Enter so
+            # the key does not land on the Home screen while it is loading.
+            document_focus = _wait_for_document_window(app_name, timeout=5.0)
             if document_focus is None:
                 pyautogui.press("enter")
                 document_focus = _wait_for_document_window(app_name)

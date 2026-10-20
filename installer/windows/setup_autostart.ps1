@@ -1,14 +1,8 @@
-# Registers MERLIN autostart via Windows Task Scheduler:
-#   1) "MERLIN LM Studio"  - at logon: starts the LM Studio server headless
-#      and loads google/gemma-4-e4b so the assistant is warm asap.
-#   2) "MERLIN Assistant"  - at logon (30s delay): launches the MERLIN GUI.
-#
-# Run from an ELEVATED PowerShell:
-#   powershell -ExecutionPolicy Bypass -File setup_autostart.ps1 -InstallDir "C:\Program Files\MERLIN"
+# Register local Ollama and MERLIN with Windows Task Scheduler.
+# Run from an elevated PowerShell (the Inno Setup installer does this for you).
 
 param(
-    [string]$InstallDir = "$env:LOCALAPPDATA\MERLIN",
-    [string]$Model = "google/gemma-4-e4b"
+    [string]$InstallDir = "$env:LOCALAPPDATA\MERLIN"
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,36 +17,42 @@ function Assert-Elevated {
 
 Assert-Elevated
 
-$lms = Get-Command "lms" -ErrorAction SilentlyContinue
-if ($lms) { $lmsPath = $lms.Source } else { $lmsPath = "$env:LOCALAPPDATA\Programs\LM Studio\lms.exe" }
-if (-not (Test-Path $lmsPath)) {
-    Write-Warning "LM Studio CLI (lms.exe) not found - LM Studio autostart task was NOT registered."
+$ollama = Get-Command "ollama" -ErrorAction SilentlyContinue
+if ($ollama) {
+    $ollamaPath = $ollama.Source
+} else {
+    $ollamaPath = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
 }
 
-# --- Task 1: LM Studio headless load at logon --------------------------------
-if (Test-Path $lmsPath) {
-    $action1 = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" `
-        -Argument "/c `"`"$lmsPath`" server start && `"$lmsPath`" load $Model`""
-    Register-ScheduledTask -TaskName "MERLIN LM Studio" `
-        -Action $action1 `
+if (Test-Path $ollamaPath) {
+    # Reuse the tray app's local API if it has already started; otherwise start
+    # a hidden `ollama serve` process. Models load lazily on MERLIN's first call.
+    $startupScript = Join-Path $PSScriptRoot "start_ollama.ps1"
+    $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$startupScript`" -OllamaPath `"$ollamaPath`""
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments
+    Register-ScheduledTask -TaskName "MERLIN Ollama" `
+        -Action $action `
         -Trigger (New-ScheduledTaskTrigger -AtLogOn) `
-        -Description "Starts LM Studio server and loads $Model for MERLIN." `
+        -Description "Starts the local Ollama API used by MERLIN." `
         -Force | Out-Null
-    Write-Host "Registered task: MERLIN LM Studio (loads $Model at logon)."
+    Write-Host "Registered task: MERLIN Ollama (local API at logon)."
+} else {
+    Write-Warning "Ollama was not found. Install/configure Ollama to start at logon separately."
 }
 
-# --- Task 2: MERLIN GUI at logon (30 s delay for the LLM to warm up) ---------
 $merlinExe = Join-Path $InstallDir "Merlin.exe"
 if (-not (Test-Path $merlinExe)) {
-    Write-Warning "Merlin.exe not found at '$merlinExe'. Pass -InstallDir <path>."
+    Write-Warning "Merlin.exe not found at '$InstallDir'. Pass -InstallDir <path>."
+    exit 1
 }
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $trigger.Delay = "PT30S"
-$action2 = New-ScheduledTaskAction -Execute $merlinExe
+$guiAction = New-ScheduledTaskAction -Execute $merlinExe
 Register-ScheduledTask -TaskName "MERLIN Assistant" `
-    -Action $action2 `
+    -Action $guiAction `
     -Trigger $trigger `
     -Description "Launches the MERLIN assistant GUI at logon." `
     -Force | Out-Null
-Write-Host "Registered task: MERLIN Assistant (starts $merlinExe 30s after logon)."
+Write-Host "Registered task: MERLIN Assistant (starts 30 seconds after logon)."

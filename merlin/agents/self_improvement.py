@@ -1,8 +1,9 @@
-"""Self_Improvement_Node: boot-time prompt refinement from execution logs.
+"""Optional boot-time prompt refinement from execution logs.
 
-Runs once per process (guarded), reads logs/execution_logs.json, has Gemma
-analyse recent failures/slow calls, and rewrites the guidelines section of
-system_prompt.txt before the voice listener starts.
+Runs once per process (guarded), reads recent execution logs, asks the
+configured local model to analyze failures/slow calls, and rewrites the
+guidelines section of system_prompt.txt. MerlinRuntime starts it outside the
+graph and only when MERLIN_SELF_IMPROVEMENT=1.
 """
 from __future__ import annotations
 
@@ -91,6 +92,8 @@ spoken request.
 Core rules:
 - Answer in the SAME language the user speaks (Spanish or English).
 - Keep spoken answers short and conversational (2-4 sentences max).
+- Do not repeat a claim or paragraph. Finish the response clearly and do not
+  restart from the beginning after already giving part of the answer.
 - Report tool results clearly (e.g. RAM usage, file paths, command output).
 - If a tool fails, apologize briefly, state what failed, and suggest the
   next step instead of dumping raw errors.

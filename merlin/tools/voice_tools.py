@@ -549,12 +549,14 @@ class SpeechQueue:
     def __init__(self, dry_run: bool = False) -> None:
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._spoken = ""
+        self._streamed_prefix = ""
         self._active = False
         self._dry_run = dry_run
         self._worker: threading.Thread | None = None
 
     def begin_turn(self) -> None:
         self._spoken = ""
+        self._streamed_prefix = ""
         with self._queue.mutex:
             self._queue.queue.clear()
         self._active = True
@@ -569,6 +571,15 @@ class SpeechQueue:
             self._spoken += sentence + " "
             self._queue.put(sentence)
 
+    def set_streamed_prefix(self, text: str, consumed_chars: int) -> None:
+        """Remember the exact LLM prefix already queued for speech.
+
+        The final response can contain paragraph breaks that are absent from
+        the normalized sentence strings in the queue, so comparing `_spoken`
+        directly with `startswith` can replay the whole response.
+        """
+        self._streamed_prefix = (text or "")[:max(0, consumed_chars)]
+
     def speak_remainder(self, final_text: str, language: str) -> None:
         """Speak the part of final_text that was never streamed, then drain."""
         if not self._active:
@@ -576,13 +587,18 @@ class SpeechQueue:
             # begin_turn(); start the turn here so their answer is spoken too.
             self.begin_turn()
         final_text = (final_text or "").strip()
-        spoken_text = self._spoken.strip()
-        if spoken_text and final_text.startswith(spoken_text):
-            remainder = final_text[len(spoken_text):].strip()
-        elif not self._spoken:
+        spoken_prefix = self._streamed_prefix or self._spoken
+        if not spoken_prefix:
             remainder = final_text
-        else:  # streamed text diverged from the final answer -> speak it all
-            remainder = final_text
+        else:
+            remainder = _text_after_normalized_prefix(final_text, spoken_prefix)
+            if remainder is None:
+                # A divergent final/fallback must not replay sentences the user
+                # has already heard. Report the mismatch rather than speaking
+                # the entire answer a second time.
+                logger.warning("Final TTS text diverged from streamed speech; "
+                               "skipping replay to avoid repeating the answer")
+                remainder = ""
         if remainder:
             self.enqueue(remainder)
         self._queue.put(None)  # drain sentinel
@@ -630,6 +646,37 @@ def split_sentences(partial: str, spoken_chars: int) -> tuple[list[str], int]:
     chunk = fresh[:upto]
     sentences = [s for s in _SENTENCE_END.split(chunk) if s]
     return sentences, spoken_chars + upto
+
+
+def _text_after_normalized_prefix(text: str, prefix: str) -> str | None:
+    """Return the suffix after `prefix`, ignoring whitespace-only differences."""
+    normalized_prefix = " ".join((prefix or "").split())
+    if not normalized_prefix:
+        return (text or "").strip()
+    normalized_chars = []
+    raw_ends = []
+    index = 0
+    source = text or ""
+    while index < len(source):
+        if source[index].isspace():
+            while index < len(source) and source[index].isspace():
+                index += 1
+            normalized_chars.append(" ")
+            raw_ends.append(index)
+        else:
+            normalized_chars.append(source[index])
+            index += 1
+            raw_ends.append(index)
+    untrimmed = "".join(normalized_chars)
+    # Trimming the normalized text also trims its raw-index map at the edges.
+    leading = len(untrimmed) - len(untrimmed.lstrip())
+    trailing = len(untrimmed.rstrip())
+    normalized_text = untrimmed.strip()
+    raw_ends = raw_ends[leading:trailing]
+    if not normalized_text.startswith(normalized_prefix):
+        return None
+    raw_cut = raw_ends[len(normalized_prefix) - 1]
+    return source[raw_cut:].strip()
 
 
 _speech_queue: SpeechQueue | None = None
