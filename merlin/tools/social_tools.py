@@ -442,9 +442,14 @@ def _publish_impl_social(platform: str, mode: str, stage_id: str) -> dict:
         _STAGED.pop(platform, None)
         return {"ok": False, "error": "The reviewed composer is no longer open; nothing was published."}
     composer = _dialog(page) if has_dialog else page
-    if not staged.get("chooser_upload") and not (
-            _file_is_still_attached(composer, staged.get("file_name", "")) or
-            _file_is_still_attached(page, staged.get("file_name", ""))):
+    # For WhatsApp story with native picker, we cannot verify image identity in the preview.
+    # Require restaging rather than publishing without verification.
+    if platform == "whatsapp" and mode == "story" and staged.get("chooser_upload"):
+        _STAGED.pop(platform, None)
+        return {"ok": False,
+                "error": "WhatsApp's native picker does not expose image identity for verification. "
+                         "Please restage the post to ensure the correct image is published."}
+    if not _file_is_still_attached(composer, staged.get("file_name", "")):
         return {"ok": False,
                 "error": "The staged image is no longer attached; nothing was published."}
     expected_text = staged.get("text", "")

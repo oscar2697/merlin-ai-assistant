@@ -200,10 +200,12 @@ def _compose_draft(instruction: str, language: str = "es") -> str:
     return answer or fallback
 
 
-def _click_first(page, selectors, timeout_ms: int = 4000, what: str = "button"):
+def _click_first(page, selectors, timeout_ms: int = 4000, what: str = "button",
+                scope=None):
+    """Click the first visible match. If scope is provided, search within it."""
     for sel in selectors:
         try:
-            matches = page.locator(sel)
+            matches = scope.locator(sel) if scope else page.locator(sel)
             if matches.count() == 0:
                 continue
             loc = matches.first
@@ -447,7 +449,7 @@ def _publish_impl(stage_id: str) -> dict:
                 "error": "The staged LinkedIn image is no longer attached; nothing was published."}
     browser_ui.announce(page, "Publicando en LinkedIn…")
     if not _click_first(page, _PUBLISH, timeout_ms=8000,
-                        what="publish button"):
+                        what="publish button", scope=editor):
         return {"ok": False,
                 "error": "No encontré el composer abierto con el borrador. "
                          "Vuelve a pedírmelo y revisa el borrador de nuevo."}

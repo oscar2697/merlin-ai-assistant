@@ -499,10 +499,13 @@ def _social_plan(q: str) -> dict | None:
     if path_match:
         text = text.replace(path_match.group(0), " ")
     text = re.sub(r"\s+", " ", text)
-    if ":" in text and "://" not in text:
+    # Find a colon separator that is not part of a time/ratio (no digit before/after)
+    # and not part of a URL (no ://). Use the matched position to extract caption.
+    sep_match = re.search(r"(?<!\d):(?!\d)", text)
+    if sep_match and "://" not in text[:sep_match.end()]:
         # An explicit caption after a colon is content, not a request:
         # "publica en Facebook: hoy empiezo un nuevo proyecto".
-        text = text.split(":", 1)[1]
+        text = text[sep_match.end():]
         text = re.sub(r"^\s*(?:facebook|whatsapp|instagram|linkedin)\b[\s:,-]*",
                       "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s+", " ", text).strip(" .,:;!?¿¡")

@@ -101,6 +101,7 @@ def test_compound_capture_and_publish_becomes_two_steps():
 
 if __name__ == "__main__":
     test_whatsapp_status_request_has_no_garbage_caption()
+    test_whatsapp_followup_acknowledgment_is_not_used_as_caption()
     test_linkedin_anaphora_attaches_the_last_screenshot()
     test_linkedin_keeps_the_topic_and_skips_the_image()
     test_facebook_caption_after_a_colon_is_verbatim()
