@@ -362,22 +362,102 @@ def _play_specific_plan(q: str) -> dict | None:
             "track_name": name, "search_field": field}
 
 
+# --- Social copy extraction -------------------------------------------------
+# People phrase these requests conversationally ("Gracias, ahora la puedes
+# subir a LinkedIn en una publicación"). Strip request boilerplate, but never
+# words in the middle of a real caption.
+_IMAGE_REFERENCE_RE = re.compile(
+    r"\b(?:(?:la|el|esta|este|esa|ese|the|this|that)\s+)?"
+    r"(?:(?:[uú]ltima|ultima|last|latest)\s+)?"
+    r"(?:captura(?:\s+de\s+pantalla)?|pantallazo|screenshot|imagen|foto|"
+    r"image|photo)\b",
+    re.IGNORECASE)
+_POLITE_PREFIX_RE = re.compile(
+    r"^(?:(?:por\s+favor|gracias|oye|vale|ok(?:ay)?|est[aá]\s+bien|ahora|entonces|bueno|"
+    r"please|thanks|hey)\b[\s,.:;!]*)+", re.IGNORECASE)
+_REQUEST_VERB_RE = re.compile(
+    r"^(?:(?:la|lo|las|los|le|les)\s+)?"
+    r"(?:(?:me\s+)?(?:puedes|puede|podr[ií]as|podrias|quieres|quiero\s+que|"
+    r"me\s+gustar[ií]a\s+que|me\s+gustaria\s+que|can\s+you|could\s+you)\s+)?"
+    r"(?:(?:la|lo|las|los)\s+)?"
+    r"(?:subir|subas|sube|s[uú]bel[ao]s?|publicar|publiques|publica|"
+    r"p[uú]blical[ao]s?|compartir|comparte|comp[aá]rtel[ao]s?|"
+    r"postear|postea|haz|hacer|pon|poner|crea|crear|genera|generar|"
+    r"escribe|escribir|redacta|redactar|l[ií]cana|"
+    r"upload|share|post|create)\w*\b\s*", re.IGNORECASE)
+_PUBLICATION_NOUN_RE = re.compile(
+    r"^(?:(?:a|al|en|para|con|de|como)\s+)?(?:una?\s+)?"
+    r"(?:publicaci[oó]n|publicaciones?|post|anuncio|actualizaci[oó]n)\b"
+    r"[\s,.:;!]*", re.IGNORECASE)
+_CONNECTOR_PREFIX_RE = re.compile(
+    r"^(?:(?:a|al|an|and|como|con|de|del|el|en|for|in|la|las|los|of|on|"
+    r"para|sobre|the|to|un|una|unos|unas|with|y|about)\b[\s,.:;!]*)+",
+    re.IGNORECASE)
+_CAPTION_FILLERS = frozenset("""
+a al an and como con de del el en esta este for la las los mi mis my of on
+para post publicacion publicación publicaciones sobre status the this to un
+una with y
+""".split())
+_ANAPHORIC_UPLOAD_RE = re.compile(
+    r"\b(?:la|lo|las|los|esa|ese|eso|esta|este|esto)\s+"
+    r"(?:(?:puedes|puede|podr[ií]as|podrias|quieres|quiero\s+que)\s+)?"
+    r"(?:subir|subirla|subirlo|publicar|publicarla|publicarlo|compartir|"
+    r"compartirla|compartirlo)\b"
+    r"|\b(?:s[uú]bel[ao]s?|p[uú]blical[ao]s?|comp[aá]rtel[ao]s?)\b",
+    re.IGNORECASE)
+
+
+_CAPTURE_REFERENCE_RE = re.compile(
+    r"\b(?:lo\s+que|what)\b[^.?!]{0,40}?\b(?:captur|screenshot|pantallazo)"
+    r"|\bas[ií]\s+es\s+lo\s+que\b|\beso\s+es\s+lo\s+que\b",
+    re.IGNORECASE)
+
+
+def _clean_social_text(value: str) -> str:
+    """Remove request boilerplate while preserving the user's real caption."""
+    text = _IMAGE_REFERENCE_RE.sub(" ", value or "")
+    text = re.sub(r"\b(?:facebook|whatsapp|instagram|linkedin)\b", " ",
+                  text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b(?:stories?|status|statuses|historia|historias|estado|estados)\b",
+        " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip().lstrip("¿¡").strip()
+    for _ in range(4):
+        before = text
+        text = _POLITE_PREFIX_RE.sub("", text, count=1).strip()
+        text = _REQUEST_VERB_RE.sub("", text, count=1).strip()
+        text = _CONNECTOR_PREFIX_RE.sub("", text, count=1).strip()
+        text = _PUBLICATION_NOUN_RE.sub("", text, count=1).strip()
+        if text == before:
+            break
+    if not text or all(word.casefold() in _CAPTION_FILLERS
+                       for word in text.split()):
+        return ""
+    text = re.sub(r"(?:[\s,.:;!]+(?:a|al|en|para|con|de|del|sobre|to|in|on|"
+                  r"with|for|of)\b)+[\s,.:;!]*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" .,:;!?¿¡")
+    if not text or all(word.casefold() in _CAPTION_FILLERS
+                       for word in text.split()):
+        return ""
+    return text
+
+
 def _linkedin_plan(q: str) -> dict | None:
     """'publica en linkedin...' / 'post ... on linkedin' -> post_linkedin."""
     if not re.search(r"\blinkedin\b", q, re.IGNORECASE):
         return None
-    rest = re.sub(r"\blinkedin\b", " ", q, flags=re.IGNORECASE)
-    rest = re.sub(r"^\s*(?:publica\w*|postea\w*|post|comparte\w*|pon|haz)\s+", "",
-                  rest.strip(), flags=re.IGNORECASE)
-    rest = re.sub(r"^(?:una?\s+)?(?:publicaci[oó]n|publicación|post)?\s*", "",
-                  rest.strip(), flags=re.IGNORECASE)
-    rest = re.sub(r"^(?:en|on|in)\s+", "", rest.strip(), flags=re.IGNORECASE)
-    rest = re.sub(r"^(?:con|about|sobre)\s+", "", rest.strip(), flags=re.IGNORECASE)
-    instruction = rest.strip(" ,.:;")
-    if instruction.lower() in ("", "en", "in", "on", "esto", "it"):
-        instruction = "comparte el avance de mi proyecto"
+    capture_reference = bool(_CAPTURE_REFERENCE_RE.search(q))
+    image_requested = bool(
+        re.search(r"\b(?:captura|pantallazo|screenshot|imagen|foto|image|photo)\b",
+                  q, re.IGNORECASE)
+        or _ANAPHORIC_UPLOAD_RE.search(q)
+        or capture_reference)
+    instruction = _clean_social_text(q)
+    if (capture_reference or not instruction
+            or not re.search(r"[a-záéíóúñ]{3,}", instruction, re.IGNORECASE)):
+        instruction = "Comparte una actualización profesional sobre mi trabajo reciente."
     plan = {"tool": "post_linkedin", "instruction": instruction}
-    if re.search(r"\b(?:captura|screenshot|imagen|foto)\b", q, re.IGNORECASE):
+    if image_requested:
         plan["image_path"] = "last"
     return plan
 
@@ -386,6 +466,16 @@ def _social_plan(q: str) -> dict | None:
     """Recognize Facebook posts/stories and WhatsApp status updates."""
     platform_match = re.search(r"\b(facebook|whatsapp)\b", q, re.IGNORECASE)
     if not platform_match:
+        return None
+    if re.search(
+            r"\b(?:qu[eé]\s+es|what\s+is|c[oó]mo\s+funciona|how\s+does)\b",
+            q, re.IGNORECASE):
+        return None
+    # A question mark does not turn a polite request ("¿Puede subir...?") into a
+    # question about the platform; only reject questions that start with one.
+    if "?" in q and re.match(
+            r"^\s*[¿¡]?\s*(?:qu[eé]|cu[aá]l|c[oó]mo|d[oó]nde|cu[aá]ndo|"
+            r"qui[eé]n|what|how|where|when|who|why)\b", q, re.IGNORECASE):
         return None
     platform = platform_match.group(1).lower()
     story_match = re.search(
@@ -408,16 +498,16 @@ def _social_plan(q: str) -> dict | None:
     text = q
     if path_match:
         text = text.replace(path_match.group(0), " ")
-    text = re.sub(r"\b(?:facebook|whatsapp)\b", " ", text, flags=re.I)
-    text = re.sub(r"\b(?:stories?|status|statuses|historia|historias|estado|estados)\b",
-                  " ", text, flags=re.I)
-    text = re.sub(r"^\s*(?:post|publica\w*|comparte\w*|sube\w*|share|upload)\s+", "",
-                  text.strip(), flags=re.IGNORECASE)
-    text = re.sub(r"^(?:una?\s+)?(?:publicaci[oó]n|post)?\s*", "",
-                  text.strip(), flags=re.IGNORECASE)
-    text = re.sub(r"^(?:en|on|in|con|with|sobre|about)\s+", "", text.strip(),
-                  flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip(" .,:;!?¿¡")
+    text = re.sub(r"\s+", " ", text)
+    if ":" in text and "://" not in text:
+        # An explicit caption after a colon is content, not a request:
+        # "publica en Facebook: hoy empiezo un nuevo proyecto".
+        text = text.split(":", 1)[1]
+        text = re.sub(r"^\s*(?:facebook|whatsapp|instagram|linkedin)\b[\s:,-]*",
+                      "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" .,:;!?¿¡")
+    else:
+        text = _clean_social_text(text)
     wants_image = mode == "story" or bool(attachment_path) or bool(re.search(
         r"\b(?:foto|imagen|image|photo|captura|screenshot)\b", q, re.I))
     return {"tool": "publish_social", "platform": platform, "mode": mode,
@@ -587,6 +677,21 @@ def _fast_steps(query: str) -> list | None:
     social = _social_plan(query)
     if social and not _STEP_SPLIT.search(q):
         return [social]
+    # "toma una captura y publícala en LinkedIn/WhatsApp". STT often garbles the
+    # capture verb ("tamos"), so pair the capture noun with the publish clause.
+    if _STEP_SPLIT.search(query):
+        parts = [p.strip(" ?.,!¿¡") for p in _STEP_SPLIT.split(query) if p.strip()]
+        if (len(parts) == 2
+                and re.search(r"\b(?:captura|screenshot|pantallazo)\b", parts[0],
+                              re.IGNORECASE)):
+            publish = _linkedin_plan(parts[1].lower()) or _social_plan(parts[1])
+            if publish:
+                publish = dict(publish)
+                if publish.get("tool") == "post_linkedin":
+                    publish["image_path"] = "last"
+                else:
+                    publish["file_path"] = "last"
+                return [{"tool": "take_screenshot", "target": "screen"}, publish]
     # Treat compound "open Word + create/write content" as one writing
     # workflow. The writing tool can launch/focus Word, create the document,
     # insert generated text and verify it. Splitting this request previously
@@ -641,7 +746,7 @@ def _ask_staged_confirmation(plan: dict, result: dict, language: str) -> str | N
     if plan.get("tool") == "publish_social":
         platform = str(plan.get("platform", "social media")).title()
         mode = plan.get("mode", "post")
-        text = result.get("text") or plan.get("text") or ""
+        text = result.get("text", plan.get("text") or "")
         attachment = Path(result.get("file") or "").name
         detail = f" {text}" if text else ""
         if attachment:
@@ -779,6 +884,8 @@ def os_agent_node(state: GraphState) -> dict:
                                           "publish_social")
                 and not (plan.get("file_path") or plan.get("image_path"))):
             plan["file_path" if plan.get("tool") == "publish_social" else "image_path"] = "last"
+        if plan.get("tool") in ("post_linkedin", "publish_social"):
+            plan.setdefault("language", language)
         # Irreversible step (message / media / call): confirm BEFORE running it.
         # Earlier steps in the chain (e.g. the screenshot) already ran, so the
         # confirmation references fresh data.

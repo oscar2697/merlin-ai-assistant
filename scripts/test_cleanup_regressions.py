@@ -31,7 +31,11 @@ def test_terminal_uses_explicit_shell_without_shell_true():
             patch.object(system_tools.subprocess, "run", return_value=completed) as run:
         result = system_tools.execute_terminal_command("echo ok")
     assert result["ok"] is True
-    assert run.call_args.args[0][-2:] in (["-c", "echo ok"], ["/c", "echo ok"])
+    argv = run.call_args.args[0]
+    if isinstance(argv, str):
+        assert "/c" in argv and "echo ok" in argv
+    else:
+        assert argv[-2:] == ["-c", "echo ok"]
     assert run.call_args.kwargs["shell"] is False
 
 

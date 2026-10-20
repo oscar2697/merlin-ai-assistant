@@ -124,6 +124,10 @@ during a voice session.
   and feed posts. These browser workflows depend on the logged-in site UI.
 - LinkedIn can stage a post with an image in its browser composer. Review the
   visible draft and explicitly confirm before it is published.
+- While a browser publishing workflow runs, MERLIN's floating cursor shows what
+  it is doing (opening the editor, attaching the image, publishing). Clicking
+  the platform's buttons is still done by the browser automation, not by moving
+  your own pointer.
 - File sharing and publishing depend on the target app, its login session, and
   the file types accepted by that platform. Instagram publishing is not
   implemented.

@@ -91,7 +91,9 @@ class LLMConnector:
             "think": self.think,
             "keep_alive": "5m",
             "options": {
-                "num_ctx": 8192
+                "num_ctx": 8192,
+                "temperature": self.config.temperature,
+                "num_predict": self.config.llm_max_tokens,
             }
         }
 

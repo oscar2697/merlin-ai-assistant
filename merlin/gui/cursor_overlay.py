@@ -175,45 +175,6 @@ def agent_mode():
         pulse(0.8)  # short linger after the last step
 
 
-def announce(x: float, y: float) -> None:
-    """Move/ping MERLIN's own cursor at a target without moving the user's mouse."""
-    if _enabled and _overlay is not None:
-        if _INDEPENDENT:
-            move_agent_to(x, y, duration=0.22)
-        _pings.put((x, y))
-        pulse(1.2)
-
-
-def announce_click(x: float, y: float) -> None:
-    announce(x, y)
-
-
-def announce_wait(x: float, y: float, duration: float = 0.55) -> None:
-    """announce + block briefly so the animation is visible before a click."""
-    if not (_enabled and _overlay is not None):
-        return
-    announce(x, y)
-    time.sleep(duration)
-
-
-def current_position() -> tuple | None:
-    """Where the REAL mouse pointer is (the avatar's eyes follow it)."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-        pt = wintypes.POINT()
-        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-        return pt.x, pt.y
-    except Exception:
-        return None
-
-
-def agent_position() -> tuple[float, float] | None:
-    """Current position of MERLIN's independent pointer, not the user's mouse."""
-    with _agent_lock:
-        return _agent_pos or _agent_target
-
-
 def set_agent_origin(x: float, y: float) -> None:
     """Set the visual origin from which MERLIN's cursor emerges (the wizard)."""
     global _agent_pos, _agent_target, _agent_move_from, _agent_origin
