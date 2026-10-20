@@ -75,7 +75,16 @@ class MerlinConfig:
     @property
     def lm_studio_base_url(self) -> str:
         """Backward-compatible alias for callers using the former field name."""
-        return self.ollama_base_url
+        return self.normalized_ollama_base_url
+
+    @property
+    def normalized_ollama_base_url(self) -> str:
+        """Normalize Ollama host: trim whitespace, remove trailing slashes, add http:// if missing scheme."""
+        url = self.ollama_base_url.strip()
+        url = url.rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            url = "http://" + url
+        return url
 
 
 @lru_cache(maxsize=1)

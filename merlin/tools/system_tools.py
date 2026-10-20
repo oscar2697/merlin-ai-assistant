@@ -73,10 +73,12 @@ def check_command_safety(command: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def _shell_argv(command: str) -> list[str]:
+def _shell_argv(command: str) -> list[str] | str:
     """Return an explicit platform-shell invocation for a trusted command string."""
     if sys.platform == "win32":
-        return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", command]
+        comspec = os.environ.get("COMSPEC", "cmd.exe")
+        # cmd.exe does not understand list2cmdline's \" escaping.
+        return f'"{comspec}" /d /s /c "{command}"'
     return ["/bin/sh", "-c", command]
 
 

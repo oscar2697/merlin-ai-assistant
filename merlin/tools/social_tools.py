@@ -65,15 +65,17 @@ def _page(platform: str):
 
 def _click_text(scope, labels: tuple[str, ...], timeout_ms: int = 3500) -> bool:
     for label in labels:
+        trimmed = label.strip()
+        pattern = re.compile(rf"^{re.escape(trimmed)}$", re.I)
         for role in ("button", "link"):
             try:
-                scope.get_by_role(role, name=re.compile(re.escape(label), re.I)).first.click(
+                scope.get_by_role(role, name=pattern).first.click(
                     timeout=timeout_ms)
                 return True
             except Exception:
                 continue
         try:
-            scope.get_by_text(re.compile(re.escape(label), re.I), exact=False).first.click(
+            scope.get_by_text(pattern, exact=True).first.click(
                 timeout=timeout_ms)
             return True
         except Exception:
@@ -131,8 +133,10 @@ def _logged_out(page, platform: str) -> bool:
 def _open_composer(page, platform: str, mode: str) -> bool:
     if platform == "facebook" and mode == "post":
         for label in _POST_TEXT[platform]:
+            trimmed = label.strip()
+            pattern = re.compile(rf"^{re.escape(trimmed)}$", re.I)
             try:
-                page.get_by_text(re.compile(re.escape(label), re.I), exact=False).first.click(
+                page.get_by_text(pattern, exact=True).first.click(
                     timeout=4000)
                 return True
             except Exception:
@@ -223,6 +227,8 @@ def _publish(platform: str, mode: str, stage_id: str) -> dict:
     if not _click_text(composer, labels, timeout_ms=5000):
         return {"ok": False, "error": f"Could not find the {platform} {mode} publish button in the open composer."}
     page.wait_for_timeout(2500)
+    if page.get_by_role("dialog").count():
+        return {"ok": False, "error": f"The composer dialog did not close after clicking publish; publication may have failed."}
     _STAGED.pop(platform, None)
     return {"ok": True, "published": True, "platform": platform,
             "mode": mode, "method": "playwright"}

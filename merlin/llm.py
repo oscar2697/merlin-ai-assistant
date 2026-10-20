@@ -26,7 +26,7 @@ class LLMConnector:
         self._detected_model: Optional[str] = None
         
         # Accept legacy URLs copied from LM Studio's OpenAI-compatible endpoint.
-        base = self.config.ollama_base_url.rstrip("/")
+        base = self.config.normalized_ollama_base_url
         if base.endswith("/v1"):
             base = base[:-3]
         self._base = base

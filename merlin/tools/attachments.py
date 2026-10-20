@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 SCREENSHOTS_DIR = Path.home() / "merlin" / "screenshots"
-_LATEST_ALIASES = frozenset({"", "last", "latest", "screenshot", "captura",
+_LATEST_ALIASES = frozenset({"last", "latest", "screenshot", "captura",
                             "última", "ultima"})
 
 
@@ -20,6 +20,8 @@ def latest_screenshot() -> Path | None:
 def resolve_file(value: str | Path | None) -> Path | None:
     """Resolve a file path or a latest-screenshot alias to an existing file."""
     raw = str(value or "").strip()
+    if not raw:
+        return None
     if raw.casefold() in _LATEST_ALIASES:
         return latest_screenshot()
     path = Path(raw).expanduser()

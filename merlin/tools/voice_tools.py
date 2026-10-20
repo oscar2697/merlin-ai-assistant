@@ -593,12 +593,12 @@ class SpeechQueue:
         else:
             remainder = _text_after_normalized_prefix(final_text, spoken_prefix)
             if remainder is None:
-                # A divergent final/fallback must not replay sentences the user
-                # has already heard. Report the mismatch rather than speaking
-                # the entire answer a second time.
-                logger.warning("Final TTS text diverged from streamed speech; "
-                               "skipping replay to avoid repeating the answer")
-                remainder = ""
+                # Prefix matching failed: this may be a fallback response after
+                # partial streaming. Speak the final text as a fallback to ensure
+                # the user receives the complete response.
+                logger.info("Final TTS text does not match streamed prefix; "
+                            "speaking full text as fallback")
+                remainder = final_text
         if remainder:
             self.enqueue(remainder)
         self._queue.put(None)  # drain sentinel

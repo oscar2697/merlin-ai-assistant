@@ -395,8 +395,8 @@ def _social_plan(q: str) -> dict | None:
         return None
     mode = "story" if story_match else "post"
     if not re.search(
-            r"\b(?:post|publish|publica\w*|publicaci[oó]n|comparte\w*|sube\w*|"
-            r"share|upload|create|crea\w*|haz\w*|pon\w*)\b", q, re.IGNORECASE):
+            r"\b(?:post|publish|publica\w*|publicaci[oó]n|comparte\w*|s[uú]be\w*|"
+            r"share|upload)\b", q, re.IGNORECASE) and not story_match:
         return None
 
     path_match = re.search(
@@ -411,10 +411,12 @@ def _social_plan(q: str) -> dict | None:
     text = re.sub(r"\b(?:facebook|whatsapp)\b", " ", text, flags=re.I)
     text = re.sub(r"\b(?:stories?|status|statuses|historia|historias|estado|estados)\b",
                   " ", text, flags=re.I)
-    text = re.sub(r"\b(?:post|publica\w*|comparte\w*|sube\w*|share|upload|"
-                  r"en|de|a|mi|my|una?|este|esta|this|la|el|with|con|sobre|about|"
-                  r"foto|imagen|image|captura|screenshot|publicaci[oó]n\w*)\b",
-                  " ", text, flags=re.I)
+    text = re.sub(r"^\s*(?:post|publica\w*|comparte\w*|sube\w*|share|upload)\s+", "",
+                  text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"^(?:una?\s+)?(?:publicaci[oó]n|post)?\s*", "",
+                  text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"^(?:en|on|in|con|with|sobre|about)\s+", "", text.strip(),
+                  flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip(" .,:;!?¿¡")
     wants_image = mode == "story" or bool(attachment_path) or bool(re.search(
         r"\b(?:foto|imagen|image|photo|captura|screenshot)\b", q, re.I))
@@ -646,7 +648,8 @@ def _ask_staged_confirmation(plan: dict, result: dict, language: str) -> str | N
             detail += (f" con la imagen {attachment}" if es
                        else f" with image {attachment}")
         if es:
-            return (f"Preparé {mode} para {platform}:{detail}. Está abierto para "
+            mode_es = {"story": "una historia", "post": "una publicación"}.get(mode, mode)
+            return (f"Preparé {mode_es} para {platform}:{detail}. Está abierto para "
                     "que lo revises. ¿Lo publico? Di sí o no.")
         return (f"I staged a {mode} for {platform}:{detail}. Review it in the "
                 "open window. Publish it? Say yes or no.")
@@ -749,11 +752,11 @@ def os_agent_node(state: GraphState) -> dict:
     if steps is None:
         if _UNSUPPORTED_STORY_RE.search(query):
             updates["final_response"] = (
-                "La publicación de historias o estados en WhatsApp, Facebook e "
-                "Instagram aún no está implementada. No realicé ninguna acción."
+                "La publicación en Instagram aún no está implementada."
+                "No realicé ninguna acción."
                 if str(language).lower().startswith("es") else
-                "Publishing WhatsApp, Facebook, or Instagram stories/statuses "
-                "is not implemented yet. I did not take any action.")
+                "Publishing to Instagram is not implemented yet."
+                "I did not take any action.")
             return updates
         steps = _fast_steps(query)
         if steps is None:

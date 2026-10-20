@@ -30,7 +30,7 @@ def run_check() -> int:
         print(f"Ollama OK - modelo disponible: {model}")
         return 0
     print("Ollama no está disponible o el modelo configurado no está instalado. "
-          f"Comprueba el servidor de Ollama en {get_config().ollama_base_url} y "
+          f"Comprueba el servidor de Ollama en {get_config().normalized_ollama_base_url} y "
           f"que exista el modelo '{get_config().model_name}' (ollama list).")
     return 1
 
