@@ -1,4 +1,4 @@
-"""Hybrid intent router (keyword map first, optional Gemma classification fallback)."""
+"""Bilingual keyword router with an optional local LLM classification fallback."""
 from __future__ import annotations
 
 import logging
@@ -8,6 +8,7 @@ import re
 from merlin import confirm
 from merlin.llm import get_llm
 from merlin.state import GraphState
+from merlin.text_intents import WRITE_VERB_PATTERN
 
 logger = logging.getLogger("merlin.router")
 
@@ -34,7 +35,8 @@ KEYWORD_MAP = {
         "volume", "process", "apaga", "enciende", "reprodu", "canción",
         "cancion", "artista", "artist", "song", "playlist", "play",
         "pause", "pausa", "llama", "llamar", "llám", "llamada",
-        "videollamada", "marc", "call", "linkedin", "captura", "screenshot",
+        "videollamada", "marc", "call", "linkedin", "facebook", "instagram",
+        "captura", "screenshot",
     ),
     ROUTE_WEB: (
         "arxiv", "paper", "artículo", "articulo", "search", "buscar",
@@ -43,7 +45,7 @@ KEYWORD_MAP = {
     ),
 }
 
-# "dile a mamá que...", "envía un mensaje a Juan...", "send a message to ..."
+# Spanish and English examples of direct-message requests.
 # -> send a WhatsApp message (os_agent).
 _MESSAGE_INTENT = re.compile(
     r"\b(?:dile|d[ií]gale|escr[ií]bele|m[aá]ndale|env[ií]ale)\s+a\b"
@@ -52,34 +54,19 @@ _MESSAGE_INTENT = re.compile(
     re.IGNORECASE)
 
 # "escribe/redacta/describe ... en Word" -> write text into a desktop app.
-# Both parts are required: a bare "describe cómo funciona X" is just a question.
-_WRITE_VERB = re.compile(
-    r"\b(?:escribe|escriba|escrib[ií]|escribir|escriban|escribid|escr[ií]beme|"
-    r"redacta|redact[eé]|redactar|redacten|redactad|red[aá]ctame|"
-    r"describe|describa|describ[ií]|describir|describan|describid|"
-    r"write|writes|draft|drafts|compose|composes|"
-    r"crea|cre[aá]|crear|cree|creen|cread|crearme|"
-    r"genera|gener[aá]|generar|genere|generen|generad|gen[eé]rame|"
-    r"elabora|elabor[aá]|elaborar|elabore|elaboren|"
-    r"prepara|prepar[aá]|preparar|prepare|preparen|haz(?:me)?|hacer|haga|hagan)\b",
-    re.IGNORECASE)
+# Both parts are required: a bare Spanish "describe how X works" is a question.
+_WRITE_VERB = re.compile(rf"\b{WRITE_VERB_PATTERN}\b", re.IGNORECASE)
 _WRITE_APP = re.compile(
     r"\b(?:word|wordpad|bloc\s+de\s+notas|notepad|onenote|outlook|excel|powerpoint)\b",
     re.IGNORECASE)
 _WRITE_REQUEST = re.compile(
-    r"\b(?:escribe|escriba|escrib[ií]|escribir|escriban|escribid|escr[ií]beme|"
-    r"redacta|redact[eé]|redactar|redacten|redactad|red[aá]ctame|"
-    r"write|writes|draft|drafts|compose|composes|"
-    r"crea|cre[aá]|crear|cree|creen|cread|crearme|"
-    r"genera|gener[aá]|generar|genere|generen|generad|gen[eé]rame|"
-    r"elabora|elabor[aá]|elaborar|elabore|elaboren|"
-    r"prepara|prepar[aá]|preparar|prepare|preparen|haz(?:me)?|hacer|haga|hagan)\b.{0,100}\b(?:p[aá]rrafo|"
+    rf"\b{WRITE_VERB_PATTERN}\b.{{0,100}}\b(?:p[aá]rrafo|"
     r"texto|resumen|ensayo|carta|poema|correo|art[ií]culo|historia|"
     r"paragraph|text|summary|essay|letter|poem|email|article|story)\b",
     re.IGNORECASE)
 
 # "busca ... / search ..." goes to the web agent, unless the request is really
-# about files, music or WhatsApp ("busca el archivo...", "busca la canción...").
+# about files, music, or WhatsApp (Spanish examples are preserved).
 _SEARCH_INTENT = re.compile(
     r"\b(?:busca\w*|b[uú]scame|investiga\w*|search|look\s+up|googlea\w*)\b",
     re.IGNORECASE)

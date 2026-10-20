@@ -56,7 +56,7 @@ def fetch_web_content(url_or_query: str) -> dict:
                   or (data.get("Answer") if isinstance(data.get("Answer"), str) else "")
                   or "")
         return {"ok": bool(answer), "query": target,
-                "content": answer or "No instant answer found; full web search arrives with the Tavily integration."}
+                "content": answer or "No instant answer found."}
     except Exception as exc:
         logger.exception("fetch_web_content failed")
         return {"ok": False, "error": str(exc)}

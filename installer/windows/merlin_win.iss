@@ -19,9 +19,10 @@ PrivilegesRequired=admin
 [Files]
 Source: "..\..\dist\Merlin\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 Source: "..\windows\setup_autostart.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "..\windows\start_ollama.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 
 [Tasks]
-Name: "autostart"; Description: "Start MERLIN and LM Studio (model google/gemma-4-e4b) when I log on"; Flags: unchecked
+Name: "autostart"; Description: "Start MERLIN and Ollama when I log on"; Flags: unchecked
 Name: "desktopicon"; Description: "Create a &desktop icon"; Flags: unchecked
 
 [Icons]
@@ -36,5 +37,5 @@ Filename: "{app}\Merlin.exe"; Description: "Launch MERLIN"; Flags: nowait postin
 
 [UninstallRun]
 Filename: "powershell.exe"; \
-  Parameters: "-ExecutionPolicy Bypass -Command ""Unregister-ScheduledTask -TaskName 'MERLIN Assistant' -Confirm:`$false; Unregister-ScheduledTask -TaskName 'MERLIN LM Studio' -Confirm:`$false"""; \
+  Parameters: "-ExecutionPolicy Bypass -Command ""Unregister-ScheduledTask -TaskName 'MERLIN Assistant' -Confirm:`$false; Unregister-ScheduledTask -TaskName 'MERLIN Ollama' -Confirm:`$false"""; \
   Flags: runhidden; RunOnceId: "RemoveAutostart"

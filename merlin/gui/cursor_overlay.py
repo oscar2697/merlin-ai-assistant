@@ -1024,12 +1024,6 @@ class CursorOverlay:
                 _, result = event
                 self._task_result_text = result
                 self._panel_until = now + 45.0
-                try:
-                    if getattr(self, "_result_text_widget", None) is not None:
-                        self._result_text_widget.destroy()
-                        self._result_text_widget = None
-                except Exception:
-                    pass
                 self._panel_revision += 1
             elif event[0] == "task_finish":
                 self._task_active_ui = False
@@ -1281,7 +1275,7 @@ class CursorOverlay:
         self._last_status_layout = layout
 
     def _draw_info_panel(self, now: float) -> None:
-        """Show only the final answer/research result in the right-side panel."""
+        """Show the live answer or final result in the right-side panel."""
         result = str(self._task_result_text or "").strip()
         if now >= self._panel_until or not result:
             if self._panel_items:
@@ -1302,7 +1296,7 @@ class CursorOverlay:
         w = min(560, max(400, int(self._vw * 0.33)))
         x1 = max(10, self._vw - w - 24)
         y1 = 72
-        # This card is for final answers and research findings only.
+        # The card grows with streamed answer text and remains visible at completion.
         body_font = tkfont.Font(family="Segoe UI", size=11)
         max_chars = 2100
         body = result[:max_chars].strip()
@@ -1333,10 +1327,10 @@ class CursorOverlay:
             x1+29, y1+28, text="✦", fill="#9be7ff",
             font=("Segoe UI Symbol", 13, "bold"), anchor="center"))
         items.append(self.canvas.create_text(
-            x1+52, y1+13, text="RESULTADOS", fill="#92e2ff",
+            x1+52, y1+13, text="RESULTS", fill="#92e2ff",
             font=("Segoe UI", 9, "bold"), anchor="nw"))
         items.append(self.canvas.create_text(
-            x1+52, y1+31, text="Respuesta e investigación", fill="#91a9c3",
+            x1+52, y1+31, text="Answer and research", fill="#91a9c3",
             font=("Segoe UI", 8), anchor="nw"))
         items.append(self.canvas.create_line(x1+16, y1+62, x2-16, y1+62,
                                              fill="#29445f", width=1))
@@ -1345,20 +1339,22 @@ class CursorOverlay:
         # outside the result card.
         try:
             import tkinter as tk
-            if getattr(self, "_result_text_widget", None) is not None:
-                self._result_text_widget.destroy()
-            if getattr(self, "_result_scrollbar", None) is not None:
-                self._result_scrollbar.destroy()
             text_h = max(6, min(26, int((h - 94) / 19)))
-            self._result_text_widget = tk.Text(
-                self.win, wrap="word", height=text_h, width=max(32, int((w-42)/8)),
-                bg="#0a1425", fg="#e3edf9", insertbackground="#e3edf9",
-                relief="flat", borderwidth=0, highlightthickness=0,
-                font=("Segoe UI", 11), padx=3, pady=4,
-                spacing1=3, spacing3=4, selectbackground="#244c70")
-            self._result_text_widget.insert("1.0", body)
-            self._result_text_widget.configure(state="disabled")
-            self._result_text_widget.place(x=x1+19, y=y1+72, width=w-38, height=h-88)
+            text_widget = getattr(self, "_result_text_widget", None)
+            if text_widget is None or not text_widget.winfo_exists():
+                text_widget = tk.Text(
+                    self.win, wrap="word", height=text_h, width=max(32, int((w-42)/8)),
+                    bg="#0a1425", fg="#e3edf9", insertbackground="#e3edf9",
+                    relief="flat", borderwidth=0, highlightthickness=0,
+                    font=("Segoe UI", 11), padx=3, pady=4,
+                    spacing1=3, spacing3=4, selectbackground="#244c70")
+                self._result_text_widget = text_widget
+            text_widget.configure(state="normal", height=text_h,
+                                  width=max(32, int((w-42)/8)))
+            text_widget.delete("1.0", "end")
+            text_widget.insert("1.0", body)
+            text_widget.configure(state="disabled")
+            text_widget.place(x=x1+19, y=y1+72, width=w-38, height=h-88)
             # The overlay window is click-through by design; the panel is informational.
             self._panel_items.extend(items)
             self._panel_layout = (x1, y1, w, h, body)

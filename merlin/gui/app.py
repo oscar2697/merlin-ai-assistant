@@ -395,13 +395,15 @@ class MerlinApp(ctk.CTk):
 
     def _render_partial(self, partial: str) -> None:
         """Token-by-token streaming fills the MERLIN bubble in real time; the
-        wizard's speech bubble also echoes the tail of what it is saying."""
+        results card mirrors the text that is being generated and spoken."""
         if self._stream_bubble is None:
             self._stream_bubble = _Bubble(self.chat, partial, who="merlin")
         else:
             self._stream_bubble.set_text(partial)
-        # The wizard keeps its animated speaking state, but all text bubbles now
-        # belong to the independent cursor to avoid duplicate dialogue sources.
+        try:
+            cursor_overlay.task_result(partial)
+        except Exception:
+            logger.debug("streaming result panel update failed", exc_info=True)
 
     def _finalize_stream(self, response: str) -> None:
         """Finalize chat output and briefly echo the result beside the cursor."""

@@ -1,4 +1,4 @@
-"""Direct_Response_Node: general conversation with Gemma (fast profile)."""
+"""Direct_Response_Node: general conversation through the fast local model."""
 from __future__ import annotations
 
 import logging
@@ -41,6 +41,7 @@ def direct_response_node(state: GraphState) -> dict:
         def on_token(partial: str) -> None:
             post_event("merlin_partial", partial)
             sentences, spoken["chars"] = split_sentences(partial, spoken["chars"])
+            speech.set_streamed_prefix(partial, spoken["chars"])
             for sentence in sentences:
                 speech.enqueue(sentence)
     else:

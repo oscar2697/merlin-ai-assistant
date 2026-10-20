@@ -14,7 +14,7 @@ from merlin.tools import system_tools, web_tools
 
 logger = logging.getLogger("merlin.agents.web_agent")
 
-# "busca información sobre X en Google Chrome y dame un resumen" -> X
+# Extract the topic from Spanish/English search-and-summarize requests.
 _TOPIC_RE = re.compile(
     r"\b(?:search(?:\s+for)?|look\s+up|busca(?:r|me)?|b[uú]scame|investiga(?:r)?|googlea(?:r)?)\s+"
     r"(?:(?:informaci[oó]n|info|information)\s+(?:sobre|de|acerca\s+de|about|on)\s+)?"

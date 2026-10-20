@@ -30,6 +30,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from merlin.tools.attachments import resolve_file
+
 logger = logging.getLogger("merlin.tools.linkedin")
 
 _PROFILE = Path.home() / "merlin" / "browser_profiles" / "linkedin"
@@ -119,13 +121,12 @@ def _get_page():
 
 
 def _resolve_image(image_path: str) -> str | None:
-    """'last'/'' -> newest screenshot in ~/merlin/screenshots, if any."""
-    if not image_path or image_path.strip().lower() in ("last", "última",
-                                                        "ultima", "latest"):
-        files = sorted(_SCREENSHOTS.glob("merlin_*.png")) if _SCREENSHOTS.exists() else []
-        return str(files[-1]) if files else None
-    p = Path(image_path).expanduser()
-    return str(p) if p.exists() else None
+    """Resolve an image path or screenshot alias accepted by LinkedIn."""
+    path = resolve_file(image_path)
+    if path is None or path.suffix.casefold() not in {
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+        return None
+    return str(path)
 
 
 def _compose_draft(instruction: str) -> str:
@@ -267,7 +268,7 @@ def _publish_impl() -> dict:
 
 
 def post_linkedin(instruction: str = "", text: str = "", image_path: str = "",
-                  publish: bool = False) -> dict:
+                  publish: bool = False, file_path: str = "") -> dict:
     """Stage (default) or publish a LinkedIn post. See the module docstring."""
     try:
         if publish:
@@ -279,7 +280,12 @@ def post_linkedin(instruction: str = "", text: str = "", image_path: str = "",
                 return {"ok": False,
                         "error": "No pude redactar el post (¿está el LLM activo?)"}
         text = (text or "").strip()
-        image = _resolve_image(image_path)
+        requested_file = file_path or image_path
+        image = _resolve_image(requested_file)
+        if requested_file and image is None:
+            return {"ok": False,
+                    "error": "The attachment is missing or is not a supported image. "
+                             "LinkedIn posts currently accept image attachments only."}
         result = _on_browser_thread(lambda: _stage_impl(text, image))
         if result.get("ok"):
             result["draft"] = text

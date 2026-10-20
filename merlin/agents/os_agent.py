@@ -1,7 +1,7 @@
 """OS_Agent_Node: near-total laptop control (apps, terminal, files, media, WhatsApp).
 
-The agent plans a tool call with Gemma (structured JSON); when the LLM is
-offline it falls back to deterministic keyword heuristics so the graph never
+The agent plans a tool call with the configured local model (structured JSON).
+When the LLM is offline, it falls back to deterministic keyword heuristics so the graph never
 dead-ends. Obvious commands ("open X and play", "how much RAM", "search X") are
 planned with keywords and answered locally, so they need zero LLM calls.
 
@@ -17,14 +17,17 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 
 from merlin import confirm
 from merlin.events import post_event
 from merlin.langdetect import detect_language
 from merlin.llm import get_llm
 from merlin.state import GraphState, append_to
+from merlin.text_intents import WRITE_ACTION_RE, WRITE_VERB_RE
 from merlin.tools import (linkedin_tools, system_tools, whatsapp_tools,
                           writing_tools)
+from merlin.tools import social_tools
 
 logger = logging.getLogger("merlin.agents.os_agent")
 
@@ -75,6 +78,7 @@ _OS_TOOLS = {
     "send_whatsapp_media": whatsapp_tools.send_whatsapp_media,
     "call_whatsapp_contact": whatsapp_tools.call_whatsapp_contact,
     "post_linkedin": linkedin_tools.post_linkedin,
+    "publish_social": social_tools.publish_social,
     "search_web": system_tools.search_web,
     "write_text": _write_text,
 }
@@ -84,7 +88,15 @@ _CONFIRM_TOOLS = {"send_whatsapp_message", "send_whatsapp_media",
                   "call_whatsapp_contact"}
 
 # Tools that stage work on screen and confirm AFTER (draft visible to review).
-_STAGE_CONFIRM_TOOLS = {"post_linkedin"}
+_STAGE_CONFIRM_TOOLS = {"post_linkedin", "publish_social"}
+
+_UNSUPPORTED_STORY_RE = re.compile(
+    r"\binstagram\b.{0,50}"
+    r"\b(?:stories?|status|statuses|historias?|estados?|posts?|publicaciones?|"
+    r"publica\w*|sube\w*|publish|share|foto|imagen|image|photo)\b|"
+    r"\b(?:stories?|status|statuses|historias?|estados?|posts?|publicaciones?|"
+    r"publica\w*|sube\w*|publish|share|foto|imagen|image|photo)\b.{0,50}"
+    r"\binstagram\b", re.IGNORECASE)
 
 # Only these tools need the LLM to explain a successful result (their output is
 # free-form). Everything else is answered with a local one-liner.
@@ -127,30 +139,7 @@ _SEARCH_RE = re.compile(
     r"(.+?)"
     r"(?:\s+(?:en|in|on|con)\s+(?:google\s+chrome|google|chrome|internet|la\s+web|the\s+web))?\s*$")
 
-# "escribe/describe un párrafo sobre X (en Word)" -> write_text
-_WRITE_VERB_RE = re.compile(
-    r"\b(?:escribe|escriba|escrib[ií]|escribir|escriban|escribid|escr[ií]beme|"
-    r"redacta|redact[eé]|redactar|redacten|redactad|red[aá]ctame|"
-    r"describe|describa|describ[ií]|describir|describan|describid|"
-    r"write|writes|draft|drafts|compose|composes|"
-    r"crea|cre[aá]|crear|cree|creen|cread|crearme|"
-    r"genera|gener[aá]|generar|genere|generen|generad|gen[eé]rame|"
-    r"haz(?:me)?|hacer|haga|hagan|"
-    r"elabora|elabor[aá]|elaborar|elabore|elaboren|"
-    r"prepara|prepar[aá]|preparar|prepare|preparen|"
-    r"produce|producir|produzca|produzcan)\b",
-    re.IGNORECASE)
-_WRITE_ACTION_RE = re.compile(
-    r"\b(?:escribe|escriba|escrib[ií]|escribir|escriban|escribid|escr[ií]beme|"
-    r"redacta|redact[eé]|redactar|redacten|redactad|red[aá]ctame|"
-    r"describe|describa|describ[ií]|describir|describan|describid|"
-    r"write|writes|draft|drafts|compose|composes|"
-    r"haz(?:me)?|hacer|haga|hagan|crea|cre[aá]|crear|cree|creen|cread|"
-    r"genera|gener[aá]|generar|genere|generen|generad|"
-    r"elabora|elabor[aá]|elaborar|elabore|elaboren|"
-    r"prepara|prepar[aá]|preparar|prepare|preparen|"
-    r"produce|producir|produzca|produzcan)\b",
-    re.IGNORECASE)
+# Spanish and English writing requests -> write_text.
 _WRITE_NOUN_RE = re.compile(
     r"\b(?:p[aá]rrafo|paragraph|texto|text|resumen|summary|ensayo|essay|carta|letter|"
     r"poema|poem|correo|email|art[ií]culo|article|historia|story)\b")
@@ -160,7 +149,7 @@ _WRITE_APPS = (("wordpad", "WordPad"), ("word", "Word"),
                ("onenote", "OneNote"), ("outlook", "Outlook"),
                ("excel", "Excel"), ("powerpoint", "PowerPoint"))
 
-# WhatsApp: "dile a mamá que ya voy", "envía un mensaje por WhatsApp a Juan diciendo hola"
+# WhatsApp examples are in Spanish to cover natural-language commands.
 _WA_PATTERNS = (
     re.compile(r"\b(?:dile|d[ií]gale|escr[ií]bele|m[aá]ndale|env[ií]ale)\s+(?:a\s+)?"
                r"(?P<contact>.+?)\s+(?:que|diciendo|preguntando|:)\s*(?P<message>.+)$",
@@ -174,8 +163,7 @@ _WA_PATTERNS = (
                re.IGNORECASE),
 )
 
-# WhatsApp calls: "llama a mamá", "llámale a papá", "hazle una videollamada a liz",
-# "call mom on whatsapp". Accented forms ("llámale") are matched with ll[aá]m.
+# Spanish/English WhatsApp call examples. Accented forms are matched by ll[aá]m.
 _WA_CALL_VERB_RE = re.compile(
     r"\b(?:ll[aá]m\w+|marcar?|marc[aá]le|call|ring|videollam\w+)\b", re.IGNORECASE)
 _WA_CALL_PATTERNS = (
@@ -209,9 +197,10 @@ _PLANNER_PROMPT = (
     '- take_screenshot: {{"tool": "take_screenshot", "target": str ("screen" or a window name e.g. "chrome")}}\n'
     '- control_media_player: {{"tool": "control_media_player", "action": "play"|"pause"|"next"|"previous"|"play_track"|"add_to_library", "media_path": str, "shuffle": bool, "track_name": str (song/artist/album for play_track), "search_field": "all"|"song"|"artist"|"album"}}\n'
     '- send_whatsapp_message: {{"tool": "send_whatsapp_message", "contact": str, "message": str}}\n'
-    '- send_whatsapp_media: {{"tool": "send_whatsapp_media", "contact": str, "image_path": str ("last" = latest screenshot)}}\n'
+    '- send_whatsapp_media: {{"tool": "send_whatsapp_media", "contact": str, "file_path": str (local file path or "last" for latest screenshot)}}\n'
     '- call_whatsapp_contact: {{"tool": "call_whatsapp_contact", "contact": str, "video": bool (true = video call, false = voice call)}}\n'
-    '- post_linkedin: {{"tool": "post_linkedin", "instruction": str (what the post is about), "image_path": str (image to attach, "last" = latest screenshot)}}\n'
+    '- post_linkedin: {{"tool": "post_linkedin", "instruction": str (what the post is about), "file_path": str (image to attach, "last" = latest screenshot)}}\n'
+    '- publish_social: {{"tool": "publish_social", "platform": "facebook"|"whatsapp", "mode": "post"|"story", "text": str (caption), "file_path": str (image path or "last" for latest screenshot)}}\n'
     '- search_web: {{"tool": "search_web", "query": str}}\n'
     '- write_text: {{"tool": "write_text", "app_name": str (window to write in, e.g. "Word"; "" = the window the user was in), "instruction": str (what to write, e.g. "a paragraph about computer networks"), "text": str (exact text, optional)}}\n'
     'If nothing fits, return {{"tool": "none"}}.\n\n'
@@ -289,7 +278,7 @@ def _call_plan(query: str) -> dict | None:
             continue
         contact = re.sub(r"\s+(?:por|de|en|on|via)\s+whatsapp\b.*$", "",
                           m.group("contact"), flags=re.IGNORECASE)
-        # "llama a mamá y dile..." -> keep only the call; the trailing clause
+        # Spanish example: keep the call and ignore its trailing clause.
         # (", and tell her...") is not part of the contact name
         contact = re.sub(r"\s+(?:y|and)\s+.*$", "", contact, flags=re.IGNORECASE)
         contact = re.sub(r"^(?:mi|mis|el|la|my)\s+", "",
@@ -303,12 +292,12 @@ def _call_plan(query: str) -> dict | None:
 def _write_plan(query: str) -> dict | None:
     """'...puedes describir un párrafo sobre las redes' (+ Word) -> write_text."""
     q = query.lower()
-    verbs = list(_WRITE_VERB_RE.finditer(query))
+    verbs = list(WRITE_VERB_RE.finditer(query))
     if not verbs:
         return None
     # Prefer the actual writing action over a preceding "create a document"
     # clause, e.g. "create a new document and write an essay about relativity".
-    verb = next((m for m in verbs if _WRITE_ACTION_RE.fullmatch(m.group(0))), None)
+    verb = next((m for m in verbs if WRITE_ACTION_RE.fullmatch(m.group(0))), None)
     if verb is None:
         return None  # descriptive forms such as "está escribiendo" are not commands
     app = ""
@@ -393,7 +382,50 @@ def _linkedin_plan(q: str) -> dict | None:
     return plan
 
 
-# "envía la captura a mamá (por whatsapp)" -> send the LATEST screenshot
+def _social_plan(q: str) -> dict | None:
+    """Recognize Facebook posts/stories and WhatsApp status updates."""
+    platform_match = re.search(r"\b(facebook|whatsapp)\b", q, re.IGNORECASE)
+    if not platform_match:
+        return None
+    platform = platform_match.group(1).lower()
+    story_match = re.search(
+        r"\b(?:stories?|status|statuses|historia|historias|estado|estados)\b",
+        q, re.IGNORECASE)
+    if platform == "whatsapp" and not story_match:
+        return None
+    mode = "story" if story_match else "post"
+    if not re.search(
+            r"\b(?:post|publish|publica\w*|publicaci[oó]n|comparte\w*|s[uú]be\w*|"
+            r"share|upload)\b", q, re.IGNORECASE) and not story_match:
+        return None
+
+    path_match = re.search(
+        r"(?P<quoted>['\"])(?P<qpath>[^'\"]+\.(?:png|jpe?g|gif|webp|bmp))(?P=quoted)|"
+        r"(?P<path>(?:[a-z]:\\|/)[^\s'\"]+\.(?:png|jpe?g|gif|webp|bmp))",
+        q, re.IGNORECASE)
+    attachment_path = (path_match.group("qpath") or path_match.group("path")
+                       if path_match else "")
+    text = q
+    if path_match:
+        text = text.replace(path_match.group(0), " ")
+    text = re.sub(r"\b(?:facebook|whatsapp)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:stories?|status|statuses|historia|historias|estado|estados)\b",
+                  " ", text, flags=re.I)
+    text = re.sub(r"^\s*(?:post|publica\w*|comparte\w*|sube\w*|share|upload)\s+", "",
+                  text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"^(?:una?\s+)?(?:publicaci[oó]n|post)?\s*", "",
+                  text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"^(?:en|on|in|con|with|sobre|about)\s+", "", text.strip(),
+                  flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" .,:;!?¿¡")
+    wants_image = mode == "story" or bool(attachment_path) or bool(re.search(
+        r"\b(?:foto|imagen|image|photo|captura|screenshot)\b", q, re.I))
+    return {"tool": "publish_social", "platform": platform, "mode": mode,
+            "text": text,
+            "file_path": attachment_path or ("last" if wants_image else "")}
+
+
+# Spanish/English request patterns for sending the latest screenshot.
 _WA_MEDIA_RE = re.compile(
     r"\b(?:env[ií]a\w*|manda\w*|comparte\w*|send|share)\s+"
     r"(?:la\s+|el\s+|un[a]?\s+|this\s+)?"
@@ -416,9 +448,9 @@ def _whatsapp_media_plan(query: str) -> dict | None:
             "image_path": "last"}
 
 
-# "envía (la captura) a <contacto> (por whatsapp)" WITHOUT repeating the media
+# Follow-up requests can refer to the prior media without naming it again.
 # noun: only meaningful right after a screenshot step ("toma una captura y
-# envíala a dome"); on its own it would be ambiguous with a text message.
+# Without media context, a follow-up could be mistaken for a text message.
 _WA_SEND_TO_RE = re.compile(
     r"\b(?:env[ií]a\w*|m[aá]nd\w*|comparte\w*|pasa\w*|send|share)\s+"
     r"(?:la\s+|el\s+|un[a]?\s+|this\s+|eso\s+)?"
@@ -429,7 +461,7 @@ _WA_SEND_TO_RE = re.compile(
 
 
 def _followup_media_plan(clause: str, prev_plans: list) -> dict | None:
-    """'...y envíala a dome' after a screenshot step -> send THAT screenshot."""
+    """Resolve a media-sharing follow-up to the screenshot from the prior step."""
     if not prev_plans or prev_plans[-1].get("tool") != "take_screenshot":
         return None
     m = _WA_SEND_TO_RE.search(clause.strip(" ?.,!¿¡"))
@@ -447,7 +479,7 @@ def _followup_media_plan(clause: str, prev_plans: list) -> dict | None:
 def _screenshot_plan(q: str) -> dict | None:
     """'toma una captura (de pantalla)' -> take_screenshot.
 
-    Requires a capture VERB: 'envía la captura a mamá' is sending media,
+    Requires a capture verb; a Spanish screenshot request means media sharing,
     not taking a new screenshot."""
     takes = re.search(
         r"\b(?:toma\w*|tomar|haz|hacer|realiza|captura(?:r)?)\s+"
@@ -465,6 +497,9 @@ def _screenshot_plan(q: str) -> dict | None:
 
 def _plan_with_keywords(query: str) -> dict:
     q = query.lower()
+    social = _social_plan(query)
+    if social:
+        return social
     wa = _whatsapp_plan(query)
     if wa:
         return wa
@@ -527,7 +562,8 @@ def _fast_clause_plan(clause: str) -> dict | None:
         return plan
     if tool in ("control_system_resource", "search_web", "write_text",
                 "send_whatsapp_message", "send_whatsapp_media",
-                "call_whatsapp_contact", "take_screenshot", "post_linkedin"):
+                "call_whatsapp_contact", "take_screenshot", "post_linkedin",
+                "publish_social"):
         return plan
     if tool == "control_media_player" and plan.get("action") != "add_to_library" \
             and (words <= 7 or (plan.get("action") == "play_track" and words <= 12)):
@@ -542,12 +578,15 @@ def _fast_steps(query: str) -> list | None:
     wa = _whatsapp_plan(query)  # the message may contain "y"/"and": don't split it
     if wa:
         return [wa]
-    call = _call_plan(query)  # "llama a mamá y dile que..." stays one plan
+    call = _call_plan(query)  # Keep a call request as one plan.
     if call:
         return [call]
     linkedin = _linkedin_plan(q)  # the post instruction may contain "y"/"and"
     if linkedin and not _STEP_SPLIT.search(q):
         return [linkedin]  # "y"-chains fall through and split: capture + post
+    social = _social_plan(query)
+    if social and not _STEP_SPLIT.search(q):
+        return [social]
     # Treat compound "open Word + create/write content" as one writing
     # workflow. The writing tool can launch/focus Word, create the document,
     # insert generated text and verify it. Splitting this request previously
@@ -587,7 +626,10 @@ def _confirm_send_enabled() -> bool:
 def _ask_staged_confirmation(plan: dict, result: dict, language: str) -> str | None:
     """Staged actions (e.g. the LinkedIn draft on screen): ask to finalise."""
     es = str(language).lower().startswith("es")
-    confirm.set_pending({"plan": {**plan, "publish": True}, "language": language})
+    final_plan = {**plan, "publish": True}
+    if result.get("stage_id"):
+        final_plan["stage_id"] = result["stage_id"]
+    confirm.set_pending({"plan": final_plan, "language": language})
     if plan.get("tool") == "post_linkedin":
         draft = (result.get("draft") or "").strip()
         short = draft if len(draft) <= 220 else draft[:217] + "..."
@@ -596,6 +638,21 @@ def _ask_staged_confirmation(plan: dict, result: dict, language: str) -> str | N
                     f"\"{short}\". ¿Lo publico? Dime sí o no.")
         return (f"I staged this LinkedIn post, it's on screen: \"{short}\". "
                 f"Shall I publish it? Say yes or no.")
+    if plan.get("tool") == "publish_social":
+        platform = str(plan.get("platform", "social media")).title()
+        mode = plan.get("mode", "post")
+        text = result.get("text") or plan.get("text") or ""
+        attachment = Path(result.get("file") or "").name
+        detail = f" {text}" if text else ""
+        if attachment:
+            detail += (f" con la imagen {attachment}" if es
+                       else f" with image {attachment}")
+        if es:
+            mode_es = {"story": "una historia", "post": "una publicación"}.get(mode, mode)
+            return (f"Preparé {mode_es} para {platform}:{detail}. Está abierto para "
+                    "que lo revises. ¿Lo publico? Di sí o no.")
+        return (f"I staged a {mode} for {platform}:{detail}. Review it in the "
+                "open window. Publish it? Say yes or no.")
     return None
 
 
@@ -611,15 +668,20 @@ def _ask_action_confirmation(plan: dict, language: str) -> str | None:
     es = str(language).lower().startswith("es")
     contact = plan.get("contact", "")
     found = whatsapp_tools.resolve_contact(contact)
-    if found is None and not whatsapp_tools.search_enabled():
+    if (found is None and not whatsapp_tools.search_enabled()
+            and plan.get("tool") != "send_whatsapp_media"):
         return None  # the tool itself explains that the number is missing
     confirm.set_pending({"plan": plan, "language": language})
     if plan.get("tool") == "send_whatsapp_media":
+        attachment = (plan.get("file_path") or plan.get("image_path") or "last")
+        if str(attachment).strip().lower() in ("last", "latest", "screenshot",
+                                               "captura", "ultima", "última"):
+            attachment = "la última captura" if es else "the latest screenshot"
         if es:
-            return (f"Voy a enviar a {contact} la última captura por WhatsApp. "
-                    f"¿La envío? Dime sí o no.")
-        return (f"I'm about to send {contact} the latest screenshot on "
-                f"WhatsApp. Shall I send it? Say yes or no.")
+            return (f"Voy a enviar a {contact} el archivo {attachment} por WhatsApp. "
+                    f"¿Lo envío? Dime sí o no.")
+        return (f"I'm about to send {attachment} to {contact} on WhatsApp. "
+                f"Shall I send it? Say yes or no.")
     if plan.get("tool") == "call_whatsapp_contact":
         kind = "videollamada" if plan.get("video") else "llamada"
         if es:
@@ -638,15 +700,19 @@ def _ask_action_confirmation(plan: dict, language: str) -> str | None:
 
 def _run_step(plan: dict) -> tuple[str, dict, dict]:
     """Execute one planned tool call -> (tool_name, args, result)."""
-    tool_name = plan.get("tool", "none")
+    tool_name = plan.get("tool", "none") if isinstance(plan, dict) else "none"
+    tool = _OS_TOOLS.get(tool_name) if isinstance(tool_name, str) else None
+    if tool is None:
+        logger.warning("Rejected unknown OS tool: %r", tool_name)
+        return "none", {}, {"ok": False, "error": f"Unknown OS tool: {tool_name!r}"}
     # Keep only the arguments the tool really accepts; log what was dropped.
-    allowed = set(inspect.signature(_OS_TOOLS[tool_name]).parameters)
+    allowed = set(inspect.signature(tool).parameters)
     args = {k: v for k, v in plan.items() if k != "tool" and k in allowed}
     dropped = [k for k in plan if k != "tool" and k not in allowed]
     if dropped:
         logger.warning("Dropped unknown args for %s: %s", tool_name, dropped)
     try:
-        result = _OS_TOOLS[tool_name](**args)
+        result = tool(**args)
     except TypeError as exc:
         logger.exception("Bad arguments for %s: %s", tool_name, args)
         result = {"ok": False, "error": f"Bad arguments for {tool_name}: {exc}"}
@@ -684,6 +750,14 @@ def os_agent_node(state: GraphState) -> dict:
             return updates
 
     if steps is None:
+        if _UNSUPPORTED_STORY_RE.search(query):
+            updates["final_response"] = (
+                "La publicación en Instagram aún no está implementada."
+                "No realicé ninguna acción."
+                if str(language).lower().startswith("es") else
+                "Publishing to Instagram is not implemented yet."
+                "I did not take any action.")
+            return updates
         steps = _fast_steps(query)
         if steps is None:
             steps = [_plan_with_llm(query) or _plan_with_keywords(query)]
@@ -699,16 +773,19 @@ def os_agent_node(state: GraphState) -> dict:
     for i, plan in enumerate(steps):
         if i and calls[-1]["tool"] == "open_app" and results[-1].get("ok"):
             time.sleep(_APP_LAUNCH_WAIT)  # let the app finish opening
-        # "toma una captura y publícala/envíala": attach the fresh screenshot
+        # Attach a fresh screenshot when requested as part of the same chain.
         if (i and calls[-1]["tool"] == "take_screenshot"
-                and plan.get("tool") in ("post_linkedin", "send_whatsapp_media")
-                and not plan.get("image_path")):
-            plan["image_path"] = "last"
+                and plan.get("tool") in ("post_linkedin", "send_whatsapp_media",
+                                          "publish_social")
+                and not (plan.get("file_path") or plan.get("image_path"))):
+            plan["file_path" if plan.get("tool") == "publish_social" else "image_path"] = "last"
         # Irreversible step (message / media / call): confirm BEFORE running it.
         # Earlier steps in the chain (e.g. the screenshot) already ran, so the
         # confirmation references fresh data.
-        if (not confirmed and _confirm_send_enabled()
-                and plan.get("tool") in _CONFIRM_TOOLS):
+        requires_confirmation = (plan.get("tool") == "send_whatsapp_media"
+                                 or (_confirm_send_enabled()
+                                     and plan.get("tool") in _CONFIRM_TOOLS))
+        if not confirmed and requires_confirmation:
             pending_ask = _ask_action_confirmation(plan, language)
             if pending_ask:
                 break  # ask the user, and stop here
@@ -730,7 +807,7 @@ def os_agent_node(state: GraphState) -> dict:
         updates["final_response"] = " ".join(summaries + [pending_ask]).strip()
         return updates
 
-    # Staged tools (LinkedIn): the draft is ON SCREEN -> ask sí/no to publish.
+    # LinkedIn drafts stay visible on screen until the user confirms publishing.
     last_tool, last_result = calls[-1]["tool"], results[-1]
     if (not confirmed and last_result.get("needs_confirmation")
             and last_tool in _STAGE_CONFIRM_TOOLS):
@@ -820,14 +897,16 @@ def _summarize(tool: str, result: dict, language: str) -> str:
         return f"Listo: {action}." if es else f"Done: {action}."
     if tool == "send_whatsapp_media":
         who = result.get("contact")
+        filename = result.get("file_name") or "archivo"
         sent = result.get("sent", True)
         if result.get("ok"):
             if es:
-                return (f"Captura enviada a {who}." if sent else
-                        f"Dejé la captura lista para {who}; solo falta enviarla.")
-            return (f"Screenshot sent to {who}." if sent else
-                    f"I left the screenshot ready for {who}; it is ready to send.")
-        return f"No pude enviar la captura: {result.get('error', 'error')}"
+                return (f"Archivo {filename} enviado a {who}." if sent else
+                        f"Dejé el archivo {filename} listo para {who}; solo falta enviarlo.")
+            return (f"File {filename} sent to {who}." if sent else
+                    f"I left {filename} ready for {who}; it is ready to send.")
+        return (f"No pude enviar el archivo: {result.get('error', 'error')}" if es
+                else f"Could not send the file: {result.get('error', 'error')}")
     if tool == "send_whatsapp_message":
         who = result.get("contact")
         sent = result.get("sent", True)
@@ -865,6 +944,19 @@ def _summarize(tool: str, result: dict, language: str) -> str:
         err = result.get("error", "")
         return f"No pude preparar el post de LinkedIn: {err}" if es else \
             f"Could not prepare the LinkedIn post: {err}"
+    if tool == "publish_social":
+        platform = result.get("platform", "social media").title()
+        mode = result.get("mode", "post")
+        if result.get("published"):
+            return (f"¡Publicado en {platform}!" if es else
+                    f"Published on {platform}!")
+        if result.get("staged"):
+            return (f"Preparé el contenido para {platform}; está abierto para revisión." if es
+                    else f"The content for {platform} is staged for review.")
+        return (f"No pude preparar la publicación en {platform}: "
+                f"{result.get('error', 'error')}" if es else
+                f"Could not stage the {mode} for {platform}: "
+                f"{result.get('error', 'error')}")
     if tool == "take_screenshot":
         where = ("" if result.get("target") in ("screen", "pantalla", "full")
                  else f" de {result.get('target')}")

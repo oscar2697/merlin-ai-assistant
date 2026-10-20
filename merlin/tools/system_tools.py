@@ -73,6 +73,15 @@ def check_command_safety(command: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _shell_argv(command: str) -> list[str] | str:
+    """Return an explicit platform-shell invocation for a trusted command string."""
+    if sys.platform == "win32":
+        comspec = os.environ.get("COMSPEC", "cmd.exe")
+        # cmd.exe does not understand list2cmdline's \" escaping.
+        return f'"{comspec}" /d /s /c "{command}"'
+    return ["/bin/sh", "-c", command]
+
+
 def control_system_resource(action: str) -> dict:
     """action: ram | cpu | battery | processes -> real-time hardware status."""
     action = (action or "").lower().strip()
@@ -125,7 +134,7 @@ def execute_terminal_command(command: str, timeout_seconds: int = None) -> dict:
         return {"ok": False, "error": reason}
     try:
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
+            _shell_argv(command), shell=False, capture_output=True, text=True,
             timeout=timeout_seconds or config.terminal_timeout_seconds,
         )
         return {
@@ -302,14 +311,15 @@ def _open_app_impl(app_name: str) -> dict:
             for candidate in candidates:
                 hit = _find_start_menu_shortcut(candidate)
                 if hit:
-                    subprocess.Popen(f'cmd /c start "" "{hit}"', shell=True)
+                    os.startfile(str(hit))
                     return {"ok": True, "app": candidate, "method": "start menu",
                             "shortcut": str(hit)}
-            # 3) Last resort: shell 'start' (App Paths registry, URLs)
-            res = subprocess.run(
-                f'start "" "{app_name}"', shell=True, capture_output=True, text=True)
-            if res.returncode == 0:
+            # Last resort: let Windows resolve App Paths, registered apps and URLs.
+            try:
+                os.startfile(app_name)
                 return {"ok": True, "app": app_name, "method": "shell start"}
+            except OSError:
+                pass
             return {"ok": False, "app": app_name,
                     "error": "Application not found. Say the exact app name "
                              "(e.g. 'WhatsApp', 'Spotify')."}

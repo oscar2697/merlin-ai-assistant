@@ -23,7 +23,7 @@ _NO = frozenset("""
 no cancela cancelar cancelalo dejalo olvidalo mejor para detente stop cancel
 never mind nada negativo
 """.split())
-# Neutral words that may surround a yes/no ("sí, por favor", "bueno, no")
+# Neutral fillers that may surround a yes/no (Spanish examples are preserved).
 _FILLERS = frozenset("por favor porfa gracias please pues bueno entonces".split())
 
 

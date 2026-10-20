@@ -1,4 +1,4 @@
-"""Central configuration for MERLIN (LM Studio, voice pipeline, paths, safety)."""
+"""Central configuration for MERLIN (Ollama, voice, paths, and safety)."""
 from __future__ import annotations
 
 import os
@@ -19,9 +19,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 @dataclass(frozen=True)
 class MerlinConfig:
-    # --- LLM (LM Studio, OpenAI-compatible local server) ---
-    lm_studio_base_url: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    lm_studio_api_key: str = os.getenv("LM_STUDIO_API_KEY", "")
+    # --- LLM (Ollama local HTTP API) ---
+    ollama_base_url: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     model_name: str = os.getenv("MERLIN_MODEL", "qwen2.5-coder:3b")
     # Fast non-thinking model for short syntheses (tool/web summaries).
     # Empty = use the main model everywhere.
@@ -72,6 +71,20 @@ class MerlinConfig:
         "del /f /s /q",
         "/dev/sda",
     )
+
+    @property
+    def lm_studio_base_url(self) -> str:
+        """Backward-compatible alias for callers using the former field name."""
+        return self.normalized_ollama_base_url
+
+    @property
+    def normalized_ollama_base_url(self) -> str:
+        """Normalize Ollama host: trim whitespace, remove trailing slashes, add http:// if missing scheme."""
+        url = self.ollama_base_url.strip()
+        url = url.rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            url = "http://" + url
+        return url
 
 
 @lru_cache(maxsize=1)

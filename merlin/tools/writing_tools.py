@@ -1,6 +1,6 @@
 """Write text into another desktop app: focus its window, paste via the clipboard.
 
-pyautogui.typewrite cannot produce accents, ñ or ¿ and types into whichever
+pyautogui.typewrite cannot produce accented characters, ñ, or ¿ and types into whichever
 window has focus. Pasting handles any Unicode text, and the window is focused
 first by its title. Windows only (pywin32).
 """
@@ -150,6 +150,26 @@ def _wait_for_document_window(app_name: str, timeout: float = 10.0) -> dict | No
     return None
 
 
+def _wait_for_template_gallery(app_name: str, timeout: float = 8.0) -> bool:
+    """Wait until Word's template gallery is ready after Ctrl+N from Home screen."""
+    app = (app_name or "").strip().lower()
+    if app not in ("word", "microsoft word"):
+        return True  # Not Word, no gallery to wait for
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        focus = focus_window(app_name)
+        if focus.get("ok"):
+            title = focus.get("window", "").lower()
+            # Template gallery is indicated by "new" or "blank document" in the title
+            # or the window is in a gallery state (not Home, not a document)
+            if re.search(r"\bnew\b|\bblank\b|\btemplate\b", title) or (
+                not _is_document_window(title, app_name) and
+                not re.search(r"\b(?:home|opening|start)\b", title)):
+                return True
+        time.sleep(0.3)
+    return False
+
+
 def paste_text(text: str) -> dict:
     """Paste `text` into whatever control currently has focus (any Unicode).
 
@@ -268,10 +288,12 @@ def type_into_app(app_name: str, text: str, create_new_document: bool = False) -
             time.sleep(0.45)
             # In Word, Ctrl+N from the Home screen opens the template gallery;
             # Blank document is selected by default. Confirm it with Enter.
-            document_focus = _wait_for_document_window(app_name, timeout=1.5)
-            if document_focus is None:
-                pyautogui.press("enter")
-                document_focus = _wait_for_document_window(app_name)
+            # Office may take several seconds to populate the template gallery
+            # on a cold start. Wait for the gallery before pressing Enter so
+            # the key does not land on the Home screen while it is loading.
+            _wait_for_template_gallery(app_name, timeout=8.0)
+            pyautogui.press("enter")
+            document_focus = _wait_for_document_window(app_name)
             if document_focus is None:
                 return {"ok": False,
                         "error": f"{app_name} no abrió un documento nuevo; no pegué el texto.",
