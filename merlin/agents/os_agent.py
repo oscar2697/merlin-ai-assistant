@@ -133,11 +133,49 @@ _LLM_EXPLAIN_TOOLS = {"execute_terminal_command", "manage_files"}
 # Seconds to wait after opening an app before running the next chained step.
 _APP_LAUNCH_WAIT = 4.0
 
-# Names small models often use instead of the real parameter names.
-_ARG_ALIASES = {"app": "app_name", "application": "app_name", "name": "app_name",
-                "cmd": "command", "path": "source",
-                "track": "track_name", "song": "track_name",
-                "topic": "instruction", "prompt": "instruction"}
+# Names small models often use instead of the real parameter names, scoped per tool
+# so valid schema arguments like 'path' (analyze_repo, write_project_doc) and 'topic'
+# (write_project_doc) are never clobbered or renamed to 'source' or 'instruction'.
+_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "control_system_resource": {"resource": "action"},
+    "execute_terminal_command": {"cmd": "command"},
+    "open_app": {"app": "app_name", "application": "app_name", "name": "app_name"},
+    "interact_gui_app": {"app": "app_name", "application": "app_name", "name": "app_name"},
+    "manage_files": {"path": "source", "file": "source", "filepath": "source"},
+    "control_media_player": {"track": "track_name", "song": "track_name"},
+    "send_whatsapp_message": {"app_name": "contact", "person": "contact", "to": "contact",
+                              "recipient": "contact", "contact_name": "contact", "name": "contact"},
+    "send_whatsapp_media": {"app_name": "contact", "person": "contact", "to": "contact",
+                            "recipient": "contact", "contact_name": "contact", "name": "contact",
+                            "path": "file_path", "file": "file_path"},
+    "call_whatsapp_contact": {"app_name": "contact", "person": "contact", "to": "contact",
+                              "recipient": "contact", "contact_name": "contact", "name": "contact"},
+    "post_linkedin": {"topic": "instruction", "prompt": "instruction", "path": "file_path"},
+    "publish_social": {"caption": "text", "message": "text", "path": "file_path"},
+    "write_text": {"app": "app_name", "application": "app_name", "name": "app_name",
+                   "topic": "instruction", "prompt": "instruction"},
+    "check_physics": {"name": "tool_name", "check": "tool_name", "subtool": "tool_name",
+                      "args": "arguments", "parameters": "arguments", "params": "arguments"},
+    "analyze_repo": {"source": "path", "dir": "path", "directory": "path", "target": "path"},
+    "run_project_job": {"action": "job", "command": "job", "task": "job",
+                        "path": "target", "file": "target", "test": "target", "test_file": "target"},
+    "write_project_doc": {"source": "path", "file": "path", "doc": "path",
+                          "instruction": "topic", "prompt": "topic"},
+}
+
+_COMMON_ARG_ALIASES: dict[str, str] = {
+    "app": "app_name",
+    "application": "app_name",
+    "cmd": "command",
+    "track": "track_name",
+    "song": "track_name",
+}
+
+_PHYSICS_CHECKS = {
+    "check_hermitian", "check_unitary", "check_commutator",
+    "check_normalized", "check_density_matrix", "evolve_state",
+    "check_uncertainty_relation", "check_dimensions",
+}
 
 _STEP_SPLIT = re.compile(
     r"\s+(?:y luego|y después|y despues|and then|then|luego|después|despues|y|and)\s+")
@@ -243,17 +281,62 @@ _PLANNER_PROMPT = (
 def _normalize_plan(plan: dict) -> dict:
     """Flatten nested args and fix tool/argument names the model got slightly wrong."""
     plan = dict(plan)
-    for key in ("args", "arguments", "parameters", "params"):
-        nested = plan.pop(key, None)
-        if isinstance(nested, dict):
-            plan.update(nested)
-    tool = plan.get("tool") or plan.pop("name", None) or plan.pop("tool_name", None)
+
+    # 1. Resolve tool name first so tool-specific schemas are respected.
+    tool = plan.get("tool") or plan.get("name")
+    if not tool and "tool_name" in plan:
+        cand = plan["tool_name"]
+        if cand in _OS_TOOLS:
+            tool = plan.pop("tool_name")
+        elif cand in _PHYSICS_CHECKS:
+            tool = "check_physics"
+            plan["tool_name"] = cand
     if isinstance(tool, str):
-        plan["tool"] = tool.strip()
-    for wrong, right in _ARG_ALIASES.items():
-        if wrong in plan and right not in plan:
-            plan[right] = plan.pop(wrong)
-    # WhatsApp tools: the model may call the recipient "name", "person", "to"...
+        tool = tool.strip()
+        if tool in _PHYSICS_CHECKS:
+            plan["tool_name"] = tool
+            tool = "check_physics"
+        plan["tool"] = tool
+    if "name" in plan and plan.get("tool") == plan.get("name"):
+        plan.pop("name")
+
+    # 2. Handle nested arguments according to tool schema.
+    # For check_physics, 'arguments' is a declared parameter (str | dict) and must
+    # NOT be discarded or flattened into top-level keys.
+    if plan.get("tool") == "check_physics":
+        for wrapper_key in ("args", "parameters", "params"):
+            nested = plan.get(wrapper_key)
+            if isinstance(nested, dict) and ("tool_name" in nested or "arguments" in nested):
+                plan.pop(wrapper_key)
+                for k, v in nested.items():
+                    if k not in plan:
+                        plan[k] = v
+        if "arguments" not in plan:
+            for alias_key in ("args", "params", "parameters"):
+                if alias_key in plan:
+                    plan["arguments"] = plan.pop(alias_key)
+                    break
+        if "arguments" not in plan:
+            plan["arguments"] = ""
+    else:
+        for key in ("args", "arguments", "parameters", "params"):
+            nested = plan.pop(key, None)
+            if isinstance(nested, dict):
+                plan.update(nested)
+
+    # 3. Apply tool-scoped aliases, falling back to safe common aliases.
+    tool = plan.get("tool")
+    aliases = _ARG_ALIASES.get(tool)
+    if aliases is not None:
+        for wrong, right in aliases.items():
+            if wrong in plan and right not in plan:
+                plan[right] = plan.pop(wrong)
+    else:
+        for wrong, right in _COMMON_ARG_ALIASES.items():
+            if wrong in plan and right not in plan:
+                plan[right] = plan.pop(wrong)
+
+    # 4. WhatsApp tools: the model may call the recipient "name", "person", "to"...
     if plan.get("tool") in ("call_whatsapp_contact", "send_whatsapp_message") \
             and "contact" not in plan:
         for key in ("app_name", "person", "to", "recipient", "contact_name"):
@@ -670,8 +753,10 @@ def _physics_plan(query: str) -> dict | None:
                     "target": m.group(1) if m else ""}
         return {"tool": "run_project_job", "job": "eval_oracle"}
     # "revisa mi slm / analiza el repo / lista archivos" -> read-only summary.
-    if re.search(r"\b(?:revisa\w*|analiza\w*|lista\w*|muestra\w*|resume\w*|"
-                 r"review|analy[sz]e|list|show|summar)\b", ql):
+    # An explicit Word writing request (e.g. "escribe un resumen ... en Word") must not select analyze_repo.
+    if (re.search(r"\b(?:revisa\w*|analiza\w*|lista\w*|muestra\w*|resume\w*|"
+                  r"review|analy[sz]e|list|show|summar)\b", ql)
+            and not (re.search(r"\bword\b", ql) and (WRITE_VERB_RE.search(query) or re.search(r"\b(?:escrib\w*|redact\w*|write)\b", ql)))):
         return {"tool": "analyze_repo", "path": "", "scope": "summary"}
     return None
 
@@ -700,6 +785,9 @@ def _plan_with_keywords(query: str) -> dict:
     doc = _project_doc_plan(query)
     if doc:
         return doc
+    writing = _write_plan(query)
+    if writing:
+        return writing
     physics = _physics_plan(query)
     if physics:
         return physics
@@ -725,9 +813,6 @@ def _plan_with_keywords(query: str) -> dict:
     if url and ("download" in q or "descarga" in q):
         return {"tool": "download_file", "url": url.group(0),
                 "destination_folder": "Downloads"}
-    writing = _write_plan(query)
-    if writing:
-        return writing
     search = _search_plan(q)
     if search:
         return search

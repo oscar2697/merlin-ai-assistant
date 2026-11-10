@@ -22,6 +22,41 @@ def test_physics_plan_routes_to_bridge():
     assert plan["job"] == "eval_oracle", plan
 
 
+def test_word_writing_summary_not_routed_to_analyze_repo():
+    query = "escribe un resumen sobre física cuántica en Word"
+    physics_plan = os_agent._physics_plan(query)
+    assert physics_plan is None or physics_plan.get("tool") != "analyze_repo", physics_plan
+    plan = os_agent._plan_with_keywords(query)
+    assert plan and plan.get("tool") != "analyze_repo", plan
+    assert plan.get("tool") == "write_text", plan
+    assert plan.get("app_name") == "Word", plan
+
+
+def test_general_physics_questions_not_routed_to_os():
+    from merlin import router
+    for query in (
+        "qué es la física cuántica",
+        "explícame qué es quantum mechanics",
+        "qué es un markdown",
+        "qué mejoras tiene Python 3.12",
+    ):
+        route = router.route_query(query)
+        assert route != router.ROUTE_OS, (query, route)
+
+
+def test_slm_project_intent_routes_to_os():
+    from merlin import router
+    for query in (
+        "revisa mi slm physics",
+        "check_hermitian [[1, 0], [0, 1]]",
+        "crea MEJORAS.md en el proyecto slm",
+        "corre los tests de slm physics",
+        "analiza mi proyecto slm",
+    ):
+        route = router.route_query(query)
+        assert route == router.ROUTE_OS, (query, route)
+
+
 def test_unknown_physics_tool_fails_closed():
     result = physics_bridge.check_physics("delete_everything", "{}")
     assert result["ok"] is False, result
@@ -79,6 +114,9 @@ def test_explanation_skips_intro_when_briefed():
 
 if __name__ == "__main__":
     test_physics_plan_routes_to_bridge()
+    test_word_writing_summary_not_routed_to_analyze_repo()
+    test_general_physics_questions_not_routed_to_os()
+    test_slm_project_intent_routes_to_os()
     test_unknown_physics_tool_fails_closed()
     test_analyze_repo_stays_inside_slm()
     test_analyze_repo_summary_is_readonly()

@@ -25,7 +25,10 @@ from pathlib import Path
 logger = logging.getLogger("merlin.tools.project_runner")
 
 _DEFAULT_SLM = Path(r"C:\Users\lindo\Documents\Workspace\IA\slm-physics")
-_TIMEOUT_S = int(os.environ.get("MERLIN_PROJECT_JOB_TIMEOUT", "300"))
+try:
+    _TIMEOUT_S = int(os.environ.get("MERLIN_PROJECT_JOB_TIMEOUT", "300"))
+except (ValueError, TypeError):
+    _TIMEOUT_S = 300
 _MAX_OUT = 6000
 
 

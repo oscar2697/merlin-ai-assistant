@@ -153,6 +153,64 @@ def test_explanation_gate_needs_substance():
         "analyze_repo", {"ok": False, "error": "x"}) is False
 
 
+def test_project_tools_plan_normalization_and_run_step():
+    """Verify that JSON plans for SLM/project tools reach the tool without losing args."""
+    import functools
+    import json
+
+    cases = [
+        (
+            '{"tool": "check_physics", "tool_name": "check_hermitian", "arguments": "{\\"matrix\\": [[1, 0], [0, 1]]}"}',
+            "check_physics",
+            {"tool_name": "check_hermitian", "arguments": '{"matrix": [[1, 0], [0, 1]]}'},
+        ),
+        (
+            '{"tool": "check_physics", "tool_name": "check_unitary", "arguments": {"matrix": [[0, 1], [1, 0]]}}',
+            "check_physics",
+            {"tool_name": "check_unitary", "arguments": {"matrix": [[0, 1], [1, 0]]}},
+        ),
+        (
+            '{"tool": "analyze_repo", "path": "physics_tools", "scope": "summary"}',
+            "analyze_repo",
+            {"path": "physics_tools", "scope": "summary"},
+        ),
+        (
+            '{"tool": "run_project_job", "job": "pytest", "target": "tests/test_tools.py"}',
+            "run_project_job",
+            {"job": "pytest", "target": "tests/test_tools.py"},
+        ),
+        (
+            '{"tool": "write_project_doc", "path": "MEJORAS.md", "topic": "mejoras", "stage_id": "s1", "publish": false, "language": "es"}',
+            "write_project_doc",
+            {"path": "MEJORAS.md", "topic": "mejoras", "stage_id": "s1", "publish": False, "language": "es"},
+        ),
+    ]
+
+    for raw_json, expected_tool, expected_args in cases:
+        normalized = os_agent._normalize_plan(json.loads(raw_json))
+        tool_name = normalized.get("tool")
+        assert tool_name == expected_tool, (tool_name, expected_tool)
+
+        captured = {}
+        original = os_agent._OS_TOOLS[tool_name]
+
+        @functools.wraps(original)
+        def _spy(**kwargs):
+            captured.update(kwargs)
+            return {"ok": True}
+
+        os_agent._OS_TOOLS[tool_name] = _spy
+        try:
+            dispatched, args, res = os_agent._run_step(normalized)
+        finally:
+            os_agent._OS_TOOLS[tool_name] = original
+
+        assert dispatched == expected_tool, dispatched
+        assert args == expected_args, (args, expected_args)
+        assert captured == expected_args, (captured, expected_args)
+        assert res.get("ok") is True, res
+
+
 if __name__ == "__main__":
     test_unknown_job_fails_closed()
     test_run_eval_is_not_offered()
@@ -165,4 +223,5 @@ if __name__ == "__main__":
     test_doc_publish_guards()
     test_doc_plan_routes_before_word()
     test_explanation_gate_needs_substance()
+    test_project_tools_plan_normalization_and_run_step()
     print("PASS: project runner stays on the local allowlist")
