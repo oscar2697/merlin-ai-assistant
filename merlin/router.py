@@ -36,7 +36,9 @@ KEYWORD_MAP = {
         "cancion", "artista", "artist", "song", "playlist", "play",
         "pause", "pausa", "llama", "llamar", "llám", "llamada",
         "videollamada", "marc", "call", "linkedin", "facebook", "instagram",
-        "captura", "screenshot",
+        "captura", "screenshot", "physics", "física", "fisica", "quantum",
+        "cuántica", "cuantica", "slm", "hermitian", "unitary", "eval",
+        "markdown", "mejora",
     ),
     ROUTE_WEB: (
         "arxiv", "paper", "artículo", "articulo", "search", "buscar",
