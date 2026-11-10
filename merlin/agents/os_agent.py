@@ -27,6 +27,8 @@ from merlin.state import GraphState, append_to
 from merlin.text_intents import WRITE_ACTION_RE, WRITE_VERB_RE
 from merlin.tools import (linkedin_tools, system_tools, whatsapp_tools,
                           writing_tools)
+from merlin.tools import physics_bridge
+from merlin.tools import project_runner
 from merlin.tools import social_tools
 
 logger = logging.getLogger("merlin.agents.os_agent")
@@ -81,6 +83,10 @@ _OS_TOOLS = {
     "publish_social": social_tools.publish_social,
     "search_web": system_tools.search_web,
     "write_text": _write_text,
+    "check_physics": physics_bridge.check_physics,
+    "analyze_repo": physics_bridge.analyze_repo,
+    "run_project_job": project_runner.run_project_job,
+    "write_project_doc": project_runner.write_project_doc,
 }
 
 # Tools that need a spoken yes/no before running (irreversible/interruptive).
@@ -88,7 +94,29 @@ _CONFIRM_TOOLS = {"send_whatsapp_message", "send_whatsapp_media",
                   "call_whatsapp_contact"}
 
 # Tools that stage work on screen and confirm AFTER (draft visible to review).
-_STAGE_CONFIRM_TOOLS = {"post_linkedin", "publish_social"}
+_STAGE_CONFIRM_TOOLS = {"post_linkedin", "publish_social", "write_project_doc"}
+
+# Physics/project tools: single calls get a short LLM explanation (what the
+# project is, what ran, what the result means) streamed to the GUI.
+_PROJECT_EXPLAIN_TOOLS = {"check_physics", "analyze_repo", "run_project_job",
+                          "write_project_doc"}
+
+# Projects already introduced this session: later explanations skip the
+# "what is this project" part and go straight to technical detail.
+_PROJECT_BRIEFED: set[str] = set()
+_SLM_PROJECT = "slm-physics"
+
+
+def _should_explain_tool_result(tool: str, result: dict) -> bool:
+    """Gate the LLM explanation: only when there is substance to explain.
+
+    A failed staging (no draft, no output) must fall back to the exact
+    deterministic error instead of letting the model describe missing data.
+    Failed pytest runs keep their explanation: their output is the substance.
+    """
+    if result.get("ok"):
+        return True
+    return tool == "run_project_job" and bool((result.get("output") or "").strip())
 
 _UNSUPPORTED_STORY_RE = re.compile(
     r"\binstagram\b.{0,50}"
@@ -105,11 +133,49 @@ _LLM_EXPLAIN_TOOLS = {"execute_terminal_command", "manage_files"}
 # Seconds to wait after opening an app before running the next chained step.
 _APP_LAUNCH_WAIT = 4.0
 
-# Names small models often use instead of the real parameter names.
-_ARG_ALIASES = {"app": "app_name", "application": "app_name", "name": "app_name",
-                "cmd": "command", "path": "source",
-                "track": "track_name", "song": "track_name",
-                "topic": "instruction", "prompt": "instruction"}
+# Names small models often use instead of the real parameter names, scoped per tool
+# so valid schema arguments like 'path' (analyze_repo, write_project_doc) and 'topic'
+# (write_project_doc) are never clobbered or renamed to 'source' or 'instruction'.
+_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "control_system_resource": {"resource": "action"},
+    "execute_terminal_command": {"cmd": "command"},
+    "open_app": {"app": "app_name", "application": "app_name", "name": "app_name"},
+    "interact_gui_app": {"app": "app_name", "application": "app_name", "name": "app_name"},
+    "manage_files": {"path": "source", "file": "source", "filepath": "source"},
+    "control_media_player": {"track": "track_name", "song": "track_name"},
+    "send_whatsapp_message": {"app_name": "contact", "person": "contact", "to": "contact",
+                              "recipient": "contact", "contact_name": "contact", "name": "contact"},
+    "send_whatsapp_media": {"app_name": "contact", "person": "contact", "to": "contact",
+                            "recipient": "contact", "contact_name": "contact", "name": "contact",
+                            "path": "file_path", "file": "file_path"},
+    "call_whatsapp_contact": {"app_name": "contact", "person": "contact", "to": "contact",
+                              "recipient": "contact", "contact_name": "contact", "name": "contact"},
+    "post_linkedin": {"topic": "instruction", "prompt": "instruction", "path": "file_path"},
+    "publish_social": {"caption": "text", "message": "text", "path": "file_path"},
+    "write_text": {"app": "app_name", "application": "app_name", "name": "app_name",
+                   "topic": "instruction", "prompt": "instruction"},
+    "check_physics": {"name": "tool_name", "check": "tool_name", "subtool": "tool_name",
+                      "args": "arguments", "parameters": "arguments", "params": "arguments"},
+    "analyze_repo": {"source": "path", "dir": "path", "directory": "path", "target": "path"},
+    "run_project_job": {"action": "job", "command": "job", "task": "job",
+                        "path": "target", "file": "target", "test": "target", "test_file": "target"},
+    "write_project_doc": {"source": "path", "file": "path", "doc": "path",
+                          "instruction": "topic", "prompt": "topic"},
+}
+
+_COMMON_ARG_ALIASES: dict[str, str] = {
+    "app": "app_name",
+    "application": "app_name",
+    "cmd": "command",
+    "track": "track_name",
+    "song": "track_name",
+}
+
+_PHYSICS_CHECKS = {
+    "check_hermitian", "check_unitary", "check_commutator",
+    "check_normalized", "check_density_matrix", "evolve_state",
+    "check_uncertainty_relation", "check_dimensions",
+}
 
 _STEP_SPLIT = re.compile(
     r"\s+(?:y luego|y después|y despues|and then|then|luego|después|despues|y|and)\s+")
@@ -203,6 +269,10 @@ _PLANNER_PROMPT = (
     '- publish_social: {{"tool": "publish_social", "platform": "facebook"|"whatsapp", "mode": "post"|"story", "text": str (caption), "file_path": str (image path or "last" for latest screenshot)}}\n'
     '- search_web: {{"tool": "search_web", "query": str}}\n'
     '- write_text: {{"tool": "write_text", "app_name": str (window to write in, e.g. "Word"; "" = the window the user was in), "instruction": str (what to write, e.g. "a paragraph about computer networks"), "text": str (exact text, optional)}}\n'
+    '- check_physics: {{"tool": "check_physics", "tool_name": "check_hermitian"|"check_unitary"|"check_commutator"|"check_normalized"|"check_density_matrix"|"evolve_state"|"check_uncertainty_relation"|"check_dimensions", "arguments": str (JSON or "" )}}\n'
+    '- analyze_repo: {{"tool": "analyze_repo", "path": str (subpath inside slm-physics or "" for the repo root), "scope": "summary"}}\n'
+    '- run_project_job: {{"tool": "run_project_job", "job": "pytest"|"eval_oracle", "target": str (pytest file like "tests/test_tools.py" or "" for the whole suite; must be "" for eval_oracle)}}\n'
+    '- write_project_doc: {{"tool": "write_project_doc", "path": str (.md file in the slm-physics root, e.g. "MEJORAS.md"), "topic": str (what the doc is about), "stage_id": str (only when publishing), "publish": bool, "language": "es"|"en"}}\n'
     'If nothing fits, return {{"tool": "none"}}.\n\n'
     "User request: {query}\nJSON:"
 )
@@ -211,17 +281,62 @@ _PLANNER_PROMPT = (
 def _normalize_plan(plan: dict) -> dict:
     """Flatten nested args and fix tool/argument names the model got slightly wrong."""
     plan = dict(plan)
-    for key in ("args", "arguments", "parameters", "params"):
-        nested = plan.pop(key, None)
-        if isinstance(nested, dict):
-            plan.update(nested)
-    tool = plan.get("tool") or plan.pop("name", None) or plan.pop("tool_name", None)
+
+    # 1. Resolve tool name first so tool-specific schemas are respected.
+    tool = plan.get("tool") or plan.get("name")
+    if not tool and "tool_name" in plan:
+        cand = plan["tool_name"]
+        if cand in _OS_TOOLS:
+            tool = plan.pop("tool_name")
+        elif cand in _PHYSICS_CHECKS:
+            tool = "check_physics"
+            plan["tool_name"] = cand
     if isinstance(tool, str):
-        plan["tool"] = tool.strip()
-    for wrong, right in _ARG_ALIASES.items():
-        if wrong in plan and right not in plan:
-            plan[right] = plan.pop(wrong)
-    # WhatsApp tools: the model may call the recipient "name", "person", "to"...
+        tool = tool.strip()
+        if tool in _PHYSICS_CHECKS:
+            plan["tool_name"] = tool
+            tool = "check_physics"
+        plan["tool"] = tool
+    if "name" in plan and plan.get("tool") == plan.get("name"):
+        plan.pop("name")
+
+    # 2. Handle nested arguments according to tool schema.
+    # For check_physics, 'arguments' is a declared parameter (str | dict) and must
+    # NOT be discarded or flattened into top-level keys.
+    if plan.get("tool") == "check_physics":
+        for wrapper_key in ("args", "parameters", "params"):
+            nested = plan.get(wrapper_key)
+            if isinstance(nested, dict) and ("tool_name" in nested or "arguments" in nested):
+                plan.pop(wrapper_key)
+                for k, v in nested.items():
+                    if k not in plan:
+                        plan[k] = v
+        if "arguments" not in plan:
+            for alias_key in ("args", "params", "parameters"):
+                if alias_key in plan:
+                    plan["arguments"] = plan.pop(alias_key)
+                    break
+        if "arguments" not in plan:
+            plan["arguments"] = ""
+    else:
+        for key in ("args", "arguments", "parameters", "params"):
+            nested = plan.pop(key, None)
+            if isinstance(nested, dict):
+                plan.update(nested)
+
+    # 3. Apply tool-scoped aliases, falling back to safe common aliases.
+    tool = plan.get("tool")
+    aliases = _ARG_ALIASES.get(tool)
+    if aliases is not None:
+        for wrong, right in aliases.items():
+            if wrong in plan and right not in plan:
+                plan[right] = plan.pop(wrong)
+    else:
+        for wrong, right in _COMMON_ARG_ALIASES.items():
+            if wrong in plan and right not in plan:
+                plan[right] = plan.pop(wrong)
+
+    # 4. WhatsApp tools: the model may call the recipient "name", "person", "to"...
     if plan.get("tool") in ("call_whatsapp_contact", "send_whatsapp_message") \
             and "contact" not in plan:
         for key in ("app_name", "person", "to", "recipient", "contact_name"):
@@ -569,6 +684,83 @@ def _followup_media_plan(clause: str, prev_plans: list) -> dict | None:
             "image_path": "last"}
 
 
+_DOC_MD_RE = re.compile(r"\.md\b|markdown", re.IGNORECASE)
+
+
+def _project_doc_plan(query: str) -> dict | None:
+    """'crea MEJORAS.md en el proyecto slm sobre ...' -> write_project_doc.
+
+    A markdown file for the slm-physics repo is a project task, never a Word
+    dictation: route it here before the generic writing plans.
+    """
+    q = query.strip()
+    if not _DOC_MD_RE.search(q):
+        return None
+    if not re.search(
+            r"\b(?:slm[\s_-]*physics|slm\b|physics\b|f[ií]sica\b|"
+            r"proyecto\b|repo\b)\b", q, re.IGNORECASE):
+        return None
+    m = re.search(r"([\w\-]+\.md)\b", q, re.IGNORECASE)
+    filename = m.group(1) if m else "MEJORAS.md"
+    topic = q
+    topic = re.sub(r"\b(?:crea\w*|genera\w*|haz(?:me)?\w*|escribe\w*|"
+                   r"redacta\w*|prep[aá]ra\w*)\b", " ", topic, flags=re.IGNORECASE)
+    topic = re.sub(r"[\w\-]+\.md\b|markdown", " ", topic, flags=re.IGNORECASE)
+    topic = re.sub(r"\b(?:un|una|el|la|este|esta|nuevo|nueva|archivo|"
+                   r"file|documento)\b", " ", topic, flags=re.IGNORECASE)
+    topic = re.sub(r"\b(?:en|del|de|para|al)\b.{0,20}\b(?:proyecto|repo|"
+                   r"slm(?:[\s_-]*physics)?|physics)\b", " ", topic,
+                   flags=re.IGNORECASE)
+    topic = re.sub(r"\bslm(?:[\s_-]*physics)?\b|\bphysics\b", " ", topic,
+                   flags=re.IGNORECASE)
+    topic = re.sub(r"\s+", " ", topic).strip(" ,.:;!?¿¡")
+    return {"tool": "write_project_doc", "path": filename,
+            "topic": topic or "mejoras y próximos pasos del proyecto",
+            "language": detect_language(q)}
+
+
+def _physics_plan(query: str) -> dict | None:
+    """'revisa mi slm' / 'check if this matrix is hermitian' -> physics tools.
+
+    Read-only: check_physics runs local NumPy checks, analyze_repo only lists
+    files inside slm-physics. Never writes or executes the project.
+    """
+    q = query.strip()
+    ql = q.lower()
+    if not re.search(
+            r"\b(?:slm[\s_-]*physics|slm\b|physics\b|f[ií]sica\b|cu[aá]ntic\w*|"
+            r"quantum\b|hermitian|herm[ií]tico|unitary|unitari\w*|conmutador|"
+            r"commutator|density\s+matrix|matriz\s+de\s+densidad|incertidumbre|"
+            r"uncertainty|hamiltonian|hamiltoniano|evoluci[oó]n\s+unitaria|"
+            r"evolve_state|check_dimensions|dimensiones)\b",
+            ql):
+        return None
+    # Explicit tool call: "check_hermitian [[...]]" or "verifica unitario ...".
+    m = re.search(r"\b(check_[a-z_]+)\b\s*(\{.*\}|\[.*\])?", q, re.IGNORECASE)
+    if m and m.group(1).lower() in (
+            "check_hermitian", "check_unitary", "check_commutator",
+            "check_normalized", "check_density_matrix", "evolve_state",
+            "check_uncertainty_relation", "check_dimensions"):
+        return {"tool": "check_physics", "tool_name": m.group(1).lower(),
+                "arguments": (m.group(2) or "").strip()}
+    # "corre los tests / ejecuta el pytest / eval local" -> run code.
+    if re.search(r"\b(?:corre\w*|ejecuta\w*|lanza\w*|pasa\w*|run|execute)\b"
+                 r".{0,30}\b(?:tests?\b|pruebas?\b|pytest\b|eval\b|oracle\b)",
+                 ql):
+        if re.search(r"\bpytest\b|\btests?\b|\bpruebas?\b", ql):
+            m = re.search(r"\b(tests/test_[a-z0-9_]+\.py)\b", ql)
+            return {"tool": "run_project_job", "job": "pytest",
+                    "target": m.group(1) if m else ""}
+        return {"tool": "run_project_job", "job": "eval_oracle"}
+    # "revisa mi slm / analiza el repo / lista archivos" -> read-only summary.
+    # An explicit Word writing request (e.g. "escribe un resumen ... en Word") must not select analyze_repo.
+    if (re.search(r"\b(?:revisa\w*|analiza\w*|lista\w*|muestra\w*|resume\w*|"
+                  r"review|analy[sz]e|list|show|summar)\b", ql)
+            and not (re.search(r"\bword\b", ql) and (WRITE_VERB_RE.search(query) or re.search(r"\b(?:escrib\w*|redact\w*|write)\b", ql)))):
+        return {"tool": "analyze_repo", "path": "", "scope": "summary"}
+    return None
+
+
 def _screenshot_plan(q: str) -> dict | None:
     """'toma una captura (de pantalla)' -> take_screenshot.
 
@@ -590,6 +782,15 @@ def _screenshot_plan(q: str) -> dict | None:
 
 def _plan_with_keywords(query: str) -> dict:
     q = query.lower()
+    doc = _project_doc_plan(query)
+    if doc:
+        return doc
+    writing = _write_plan(query)
+    if writing:
+        return writing
+    physics = _physics_plan(query)
+    if physics:
+        return physics
     social = _social_plan(query)
     if social:
         return social
@@ -612,9 +813,6 @@ def _plan_with_keywords(query: str) -> dict:
     if url and ("download" in q or "descarga" in q):
         return {"tool": "download_file", "url": url.group(0),
                 "destination_folder": "Downloads"}
-    writing = _write_plan(query)
-    if writing:
-        return writing
     search = _search_plan(q)
     if search:
         return search
@@ -656,7 +854,8 @@ def _fast_clause_plan(clause: str) -> dict | None:
     if tool in ("control_system_resource", "search_web", "write_text",
                 "send_whatsapp_message", "send_whatsapp_media",
                 "call_whatsapp_contact", "take_screenshot", "post_linkedin",
-                "publish_social"):
+                "publish_social", "check_physics", "analyze_repo",
+                "run_project_job", "write_project_doc"):
         return plan
     if tool == "control_media_player" and plan.get("action") != "add_to_library" \
             and (words <= 7 or (plan.get("action") == "play_track" and words <= 12)):
@@ -677,6 +876,12 @@ def _fast_steps(query: str) -> list | None:
     linkedin = _linkedin_plan(q)  # the post instruction may contain "y"/"and"
     if linkedin and not _STEP_SPLIT.search(q):
         return [linkedin]  # "y"-chains fall through and split: capture + post
+    physics = _physics_plan(query)
+    if physics and not _STEP_SPLIT.search(q):
+        return [physics]
+    doc = _project_doc_plan(query)
+    if doc and not _STEP_SPLIT.search(q):
+        return [doc]
     social = _social_plan(query)
     if social and not _STEP_SPLIT.search(q):
         return [social]
@@ -761,6 +966,15 @@ def _ask_staged_confirmation(plan: dict, result: dict, language: str) -> str | N
                     "que lo revises. ¿Lo publico? Di sí o no.")
         return (f"I staged a {mode} for {platform}:{detail}. Review it in the "
                 "open window. Publish it? Say yes or no.")
+    if plan.get("tool") == "write_project_doc":
+        name = Path(plan.get("path") or result.get("path") or "archivo.md").name
+        draft = (result.get("draft") or "").strip()
+        short = draft if len(draft) <= 300 else draft[:297] + "..."
+        if es:
+            return (f"Preparé el borrador de {name} para slm-physics: "
+                    f"\"{short}\". ¿Lo creo en el proyecto? Di sí o no.")
+        return (f"I drafted {name} for slm-physics: \"{short}\". "
+                f"Create it in the project? Say yes or no.")
     return None
 
 
@@ -804,6 +1018,62 @@ def _ask_action_confirmation(plan: dict, language: str) -> str | None:
                 f"¿Lo envío? Dime sí o no.")
     return (f"I'm about to send {contact} the message: {message}. "
             f"Shall I send it? Say yes or no.")
+
+
+def _project_explanation_messages(tool: str, result: dict, language: str,
+                                    query: str, briefed: bool = False) -> list:
+    """Prompt (pure, no LLM call) explaining a physics/project tool result.
+
+    `briefed` means the project was already introduced earlier this session:
+    skip the intro and focus on technical detail.
+    """
+    es = str(language).lower().startswith("es")
+    if tool == "analyze_repo":
+        context = (f"Repo summary: {result.get('summary', '')}. "
+                   f"Checks available: {', '.join(result.get('tools', []) or [])}. "
+                   f"Tests: {result.get('tests')}, eval cases: "
+                   f"{result.get('eval_cases')}, real claims: {result.get('eval_real')}.")
+    elif tool == "run_project_job":
+        output = str(result.get("output") or result.get("error") or "")
+        tail = "\n".join(output.splitlines()[-40:])[-2000:]
+        counts = str(result.get("counts") or "").strip()
+        context = (f"Job: {result.get('job')}, ok: {result.get('ok')}. "
+                   + (f"Verified counts (quote exactly, do not round or "
+                      f"modify): {counts}. " if counts else "")
+                   + f"Output tail:\n{tail}")
+    elif tool == "write_project_doc":
+        head = str(result.get("draft") or "")[:1200]
+        context = (f"Doc file: {result.get('path')}, published: "
+                   f"{result.get('published')}, staged: "
+                   f"{result.get('staged')}."
+                   + (f" Draft head:\n{head}" if head else ""))
+    else:  # check_physics
+        context = (f"Check: {result.get('tool')}, passed: {result.get('passed')}. "
+                   f"Tool summary: {result.get('summary', '')}.")
+    lang_name = "Spanish" if es else "English"
+    if briefed:
+        system = (
+            f"You are MERLIN's science assistant. Answer in {lang_name}. "
+            "The user already knows what slm-physics is: do NOT introduce "
+            "the project again. Give a technical rundown (max 8 sentences): "
+            "the exact job/command that ran and its scope (full suite or "
+            "which file), passed/failed counts with the duration if shown, "
+            "the failed test or case names with their file paths, and one "
+            "concrete next step. Only use the data given; do not invent "
+            "files, numbers or physics.")
+    else:
+        system = (
+            f"You are MERLIN's science assistant. Answer in {lang_name}, "
+            "briefly (max 5 sentences): say what slm-physics is (one line: "
+            "a local physics verification assistant for a small language "
+            "model), what was run or checked, what the result means, and if "
+            "something failed, the likely cause plus one concrete next step. "
+            "Only use the data given; do not invent files, numbers or physics.")
+    return [
+        {"role": "system", "content": system},
+        {"role": "user",
+         "content": f"User request: {query}\n{context}"},
+    ]
 
 
 def _run_step(plan: dict) -> tuple[str, dict, dict]:
@@ -928,7 +1198,19 @@ def os_agent_node(state: GraphState) -> dict:
 
     summary = " ".join(summaries)
     last_tool, last_result = calls[-1]["tool"], results[-1]
-    if len(calls) == 1 and last_result.get("ok") and last_tool in _LLM_EXPLAIN_TOOLS:
+    if (len(calls) == 1 and last_tool in _PROJECT_EXPLAIN_TOOLS
+            and _should_explain_tool_result(last_tool, last_result)):
+        # Explain what ran and what the result means (failures included:
+        # likely cause + next step). The project intro is only given once per
+        # session; later explanations go straight to technical detail.
+        briefed = _SLM_PROJECT in _PROJECT_BRIEFED
+        updates["final_response"] = get_llm("fast").chat(
+            _project_explanation_messages(last_tool, last_result, language,
+                                          query, briefed=briefed),
+            fallback=summary,
+            on_token=lambda partial: post_event("merlin_partial", partial))
+        _PROJECT_BRIEFED.add(_SLM_PROJECT)
+    elif len(calls) == 1 and last_result.get("ok") and last_tool in _LLM_EXPLAIN_TOOLS:
         messages = [
             {"role": "system",
              "content": "You are MERLIN's OS agent. Explain the tool result to the "
@@ -1076,4 +1358,36 @@ def _summarize(tool: str, result: dict, language: str) -> str:
     if tool == "download_file":
         return (f"Downloaded to {result.get('path')} "
                 f"({result.get('size_mb')} MB).")
+    if tool == "check_physics":
+        passed = result.get("passed")
+        summary = result.get("summary", "")
+        if passed is True:
+            return (f"Verificación física superada: {summary}" if es else
+                    f"Physics check passed: {summary}")
+        return (f"Verificación física NO superada: {summary}" if es else
+                f"Physics check failed: {summary}")
+    if tool == "analyze_repo":
+        summary = result.get("summary", "")
+        return (f"Revisé slm-physics (solo lectura): {summary}" if es else
+                f"Reviewed slm-physics (read-only): {summary}")
+    if tool == "run_project_job":
+        output = (result.get("output") or result.get("error") or "").strip()
+        tail = "\n".join(output.splitlines()[-12:])
+        if result.get("ok"):
+            return (f"Ejecuté {result.get('job')} en slm-physics y pasó. "
+                    f"Cola:\n{tail}" if es else
+                    f"Ran {result.get('job')} in slm-physics and it passed. "
+                    f"Tail:\n{tail}")
+        return (f"Ejecuté {result.get('job')} y falló: "
+                f"{result.get('error') or tail}" if es else
+                f"Ran {result.get('job')} and it failed: "
+                f"{result.get('error') or tail}")
+    if tool == "write_project_doc":
+        name = Path(result.get("path") or "").name or "archivo.md"
+        if result.get("published"):
+            return (f"Archivo {name} creado en slm-physics." if es else
+                    f"Created {name} in slm-physics.")
+        if result.get("staged"):
+            return (f"Borrador de {name} listo para revisar." if es else
+                    f"Draft of {name} ready for review.")
     return f"Done. {json.dumps(result, default=str)[:300]}"

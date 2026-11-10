@@ -45,6 +45,21 @@ KEYWORD_MAP = {
     ),
 }
 
+# Explicit SLM project / physics-tool patterns that always route to os_agent.
+# These require a concrete action intent (tool name, SLM reference, run/test/check
+# verb, or .md file in project context) instead of bare subject-matter words like
+# "physics" or "quantum" that could appear in general questions.
+_SLM_PROJECT_RE = re.compile(
+    r"\bslm[\s_-]*physics\b|\bslm\b"
+    r"|\bcheck_(?:hermitian|unitary|commutator|normalized|density_matrix|"
+    r"uncertainty_relation|dimensions)\b|\bevolve_state\b"
+    r"|\b(?:revisa|analiza|lista|muestra)\w*\s+(?:mi\s+)?(?:slm|physics|proyecto)\b"
+    r"|\b(?:corre|ejecuta|lanza|run|execute)\w*\s.{0,20}\b(?:pytest|tests?|pruebas?|eval\w*|oracle)\b"
+    r"|\b[\w-]+\.md\b.{0,40}\b(?:slm|physics|proyecto|repo)\b"
+    r"|\b(?:slm|physics|proyecto|repo)\b.{0,40}\b[\w-]+\.md\b",
+    re.IGNORECASE,
+)
+
 # Spanish and English examples of direct-message requests.
 # -> send a WhatsApp message (os_agent).
 _MESSAGE_INTENT = re.compile(
@@ -118,6 +133,9 @@ def route_query(query: str) -> str:
     if _SEARCH_INTENT.search(q) and not _NOT_WEB_NOUNS.search(q):
         logger.info("Router: search intent -> %s", ROUTE_WEB)
         return ROUTE_WEB
+    if _SLM_PROJECT_RE.search(q):
+        logger.info("Router: SLM/physics project intent -> %s", ROUTE_OS)
+        return ROUTE_OS
     for route, pattern in _PATTERNS.items():
         hit = pattern.search(q)
         if hit:

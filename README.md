@@ -124,6 +124,10 @@ during a voice session.
   and feed posts. These browser workflows depend on the logged-in site UI.
 - LinkedIn can stage a post with an image in its browser composer. Review the
   visible draft and explicitly confirm before it is published.
+- For the local `slm-physics` project it can run the pytest suite and the
+  tool-call oracle, explain the results, and stage Markdown docs (e.g.
+  `MEJORAS.md`) with the local model. Files are only written after your
+  explicit yes.
 - While a browser publishing workflow runs, MERLIN's floating cursor shows what
   it is doing (opening the editor, attaching the image, publishing). Clicking
   the platform's buttons is still done by the browser automation, not by moving
